@@ -1,0 +1,148 @@
+Victor’s job
+
+Turn your intelligence into output on demand by providing:
+
+focus (single-thread routing)
+
+execution (next action + scaffolds)
+
+memory (no re-figuring-out what you already solved)
+
+momentum (proof-of-progress + streak preservation)
+
+In other words: Victor = cognitive operating system, not “chat.”
+
+Victor-as-NZT Architecture (practical, shippable)
+
+You already have a lot of the substrate (SAVE3 trust, message bus, memory vault thinking). Here’s the clean mapping:
+
+1) NZT Mode Switchboard
+
+Victor exposes 2 primary modes (and one emergency mode):
+
+CLARITY: reduce noise, compress tasks, pick the one next action
+
+DRIVE: increase output velocity, ship artifacts, enforce deadlines
+
+RECOVERY: when you’re fried—minimum viable forward motion, protect sleep
+
+Implementation: a ModeRouter that selects mode using signals: time-of-day, last output time, self-reported state, and “tab-switch pressure.”
+
+2) Single-Thread Enforcer
+
+Your brain loses output through switching. Victor should enforce one active work item:
+
+A Work Order object: goal, definition_of_done, next_3_actions, blockers, timebox
+
+A rule: no new tasks enter the active lane until the current work order is stamped.
+
+This is the core of “control.”
+
+3) Proof-of-Motion Ledger
+
+Victor must record “I shipped something” every session, even if small.
+
+Append-only runway_log.jsonl:
+
+timestamp
+
+mode
+
+work_order_id
+
+artifact path / text snippet
+
+minutes worked
+
+friction events (“wanted to switch tabs”)
+
+This creates momentum evidence—the real drug.
+
+4) Friction Capture (INBOX)
+
+When your brain tries to derail you with “but what about…”:
+
+Victor captures it to INBOX.txt (or a structured queue)
+
+tags it (idea, fear, todo, question)
+
+schedules it (now / later / never)
+
+returns you to the work order
+
+That’s literally “silence the chaos.”
+
+5) Sleep/Dream Cycle (optional but powerful)
+
+Not mystical—functional.
+
+Once per day, Victor runs a “dream job”:
+
+summarize today’s outputs
+
+extract lessons
+
+precompute tomorrow’s first work order
+
+compress notes into long-term memory
+
+That’s how you stop living in “reboot every morning” hell.
+
+The “Victor NZT-48” Operating Protocol (your 30 minutes, but Victor-driven)
+5 min — Victor Cold Start
+
+Victor asks 3 forced-choice prompts (no essay answers):
+
+Target: pick 1 from a short list Victor proposes
+
+Constraint: pick the top sabotage risk (tabs, fatigue, emotions, interruptions)
+
+Rule: select a constraint-handling rule (“ugly first pass,” “no switching,” etc.)
+
+Victor produces a Work Order.
+
+20 min — Victor Sprint
+
+Victor displays only:
+
+current file / current step
+
+next 3 actions
+
+a timer
+
+a “Return” button (if you drift)
+
+5 min — Victor Output Stamp
+
+Victor forces one of:
+
+save file
+
+commit
+
+export
+
+paste draft into log
+
+checklist update
+
+Then writes it to the Proof Ledger.
+
+Minimal file set to implement this in your Victor repo (no fluff)
+
+If you want this real, the MVP is only 6 modules:
+
+victor_nzt_mode_router.py
+
+work_order.py
+
+single_thread_enforcer.py
+
+runway_ledger.py
+
+inbox_capture.py
+
+nzt_session.py (ties it together; CLI first)
+
+Everything else can plug in later.
