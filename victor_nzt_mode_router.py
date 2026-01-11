@@ -34,8 +34,8 @@ def route_mode(
             return "DRIVE"
 
     if tab_switch_pressure is not None:
-        if not 1 <= tab_switch_pressure <= 10:
-            raise ValueError("tab_switch_pressure must be between 1 and 10")
+        if not 0 <= tab_switch_pressure <= 10:
+            raise ValueError("tab_switch_pressure must be between 0 and 10")
         if tab_switch_pressure > MAX_LOW_PRESSURE:
             return "RECOVERY"
 

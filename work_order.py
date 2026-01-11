@@ -17,6 +17,10 @@ class WorkOrder:
     timebox_minutes: Optional[int] = None
     id: str = field(default_factory=lambda: f"wo-{uuid.uuid4().hex}")
 
+    def __post_init__(self) -> None:
+        if self.timebox_minutes is not None and self.timebox_minutes <= 0:
+            raise ValueError("timebox_minutes must be positive when provided")
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,

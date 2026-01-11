@@ -17,7 +17,7 @@ class SingleThreadEnforcer:
             return None
         try:
             data = json.loads(self.state_path.read_text())
-        except (OSError, JSONDecodeError):
+        except (OSError, JSONDecodeError, ValueError):
             return None
         return WorkOrder.from_dict(data)
 
