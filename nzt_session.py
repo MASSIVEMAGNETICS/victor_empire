@@ -101,7 +101,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.start:
-        parser.error("The --start flag is required; only --start is supported in this CLI.")
+        parser.error("The --start flag is required to begin a session.")
 
     wo_path = start_session(
         goal=args.goal,

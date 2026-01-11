@@ -42,7 +42,8 @@ def route_mode(
     if last_output_minutes_ago is not None and last_output_minutes_ago > CLARITY_THRESHOLD_MINUTES:
         return "CLARITY"
 
-    if DAYTIME_START_HOUR <= hour <= DAYTIME_END_HOUR and (tab_switch_pressure or 0) <= MAX_LOW_PRESSURE:
+    pressure = tab_switch_pressure if tab_switch_pressure is not None else 0
+    if DAYTIME_START_HOUR <= hour <= DAYTIME_END_HOUR and pressure <= MAX_LOW_PRESSURE:
         return "DRIVE"
 
     return "CLARITY"
