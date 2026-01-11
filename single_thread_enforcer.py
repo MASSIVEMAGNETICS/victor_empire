@@ -22,7 +22,10 @@ class SingleThreadEnforcer:
         return WorkOrder.from_dict(data)
 
     def set_active(self, work_order: WorkOrder) -> None:
-        self.state_path.write_text(json.dumps(work_order.to_dict(), indent=2))
+        try:
+            self.state_path.write_text(json.dumps(work_order.to_dict(), indent=2))
+        except OSError as exc:
+            raise RuntimeError(f"Failed to write active work order state {self.state_path}: {exc}") from exc
 
     def clear_active(self) -> None:
         if self.state_path.exists():

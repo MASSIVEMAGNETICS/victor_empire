@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
+from json import JSONDecodeError
 from pathlib import Path
 from typing import List, Optional
 
@@ -38,8 +39,18 @@ class WorkOrder:
         )
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(self.to_dict(), indent=2))
+        try:
+            path.write_text(json.dumps(self.to_dict(), indent=2))
+        except OSError as exc:
+            raise RuntimeError(f"Failed to save work order to {path}: {exc}") from exc
 
     @classmethod
     def load(cls, path: Path) -> "WorkOrder":
-        return cls.from_dict(json.loads(path.read_text()))
+        try:
+            contents = path.read_text()
+            data = json.loads(contents)
+        except OSError as exc:
+            raise RuntimeError(f"Failed to read work order from {path}: {exc}") from exc
+        except JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid work order format in {path}: {exc}") from exc
+        return cls.from_dict(data)

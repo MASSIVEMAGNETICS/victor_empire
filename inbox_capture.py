@@ -19,6 +19,9 @@ class InboxCapture:
         line = f"[{tag}] ({schedule}) {message}"
         if work_order_id:
             line = f"{line} #wo={work_order_id}"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError as exc:
+            raise RuntimeError(f"Failed to write to inbox {self.path}: {exc}") from exc

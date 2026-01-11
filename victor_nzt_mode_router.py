@@ -31,8 +31,8 @@ def route_mode(
     if tab_switch_pressure is not None:
         if not 1 <= tab_switch_pressure <= 10:
             raise ValueError("tab_switch_pressure must be between 1 and 10")
-    if tab_switch_pressure is not None and tab_switch_pressure > 6:
-        return "RECOVERY"
+        if tab_switch_pressure > 6:
+            return "RECOVERY"
 
     if last_output_minutes_ago is not None and last_output_minutes_ago > 180:
         return "CLARITY"
