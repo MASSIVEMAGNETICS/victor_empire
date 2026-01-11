@@ -35,4 +35,4 @@ class RunwayLedger:
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry) + "\n")
         except OSError as exc:
-            raise RuntimeError(f"Failed to write to ledger {self.path}") from exc
+            raise RuntimeError(f"Failed to write to ledger {self.path}: {exc}") from exc

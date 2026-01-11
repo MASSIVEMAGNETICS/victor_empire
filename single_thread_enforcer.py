@@ -32,6 +32,6 @@ class SingleThreadEnforcer:
         active = self.get_active()
         if active and active.id != work_order.id:
             raise RuntimeError(
-                f"Active work order {active.id} must be stamped before starting {work_order.id}"
+                f"Active work order {active.id} must be completed or cleared before starting {work_order.id}"
             )
         self.set_active(work_order)
