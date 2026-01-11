@@ -3,6 +3,11 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any, Dict, Optional
 
+CLARITY_THRESHOLD_MINUTES = 180
+DAYTIME_START_HOUR = 6
+DAYTIME_END_HOUR = 18
+MAX_LOW_PRESSURE = 6
+
 
 def route_mode(
     *,
@@ -31,13 +36,13 @@ def route_mode(
     if tab_switch_pressure is not None:
         if not 1 <= tab_switch_pressure <= 10:
             raise ValueError("tab_switch_pressure must be between 1 and 10")
-        if tab_switch_pressure > 6:
+        if tab_switch_pressure > MAX_LOW_PRESSURE:
             return "RECOVERY"
 
-    if last_output_minutes_ago is not None and last_output_minutes_ago > 180:
+    if last_output_minutes_ago is not None and last_output_minutes_ago > CLARITY_THRESHOLD_MINUTES:
         return "CLARITY"
 
-    if 6 <= hour <= 18 and (tab_switch_pressure or 0) <= 6:
+    if DAYTIME_START_HOUR <= hour <= DAYTIME_END_HOUR and (tab_switch_pressure or 0) <= MAX_LOW_PRESSURE:
         return "DRIVE"
 
     return "CLARITY"

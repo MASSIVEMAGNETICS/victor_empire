@@ -29,6 +29,9 @@ class WorkOrder:
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorkOrder":
+        missing = [field for field in ("goal", "definition_of_done") if field not in data]
+        if missing:
+            raise ValueError(f"WorkOrder missing required fields: {', '.join(missing)}")
         return cls(
             id=data.get("id", f"wo-{uuid.uuid4().hex}"),
             goal=data["goal"],
