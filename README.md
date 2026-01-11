@@ -13,3 +13,11 @@ The project direction lives in the [roadmap](./roadmap). It outlines Victor’s 
 6. nzt_session.py (ties it together; CLI first)
 
 Use the roadmap as the source of truth for planning and execution.
+
+## Quickstart (personal-grade CLI)
+
+```bash
+python nzt_session.py --start --goal "Ship MVP" --next "Draft CLI" --inbox "idea: add web UI"
+```
+
+This creates a work order file, appends to the runway ledger, captures inbox items, and enforces a single active work order.
