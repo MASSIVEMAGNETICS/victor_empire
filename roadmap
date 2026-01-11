@@ -146,3 +146,20 @@ inbox_capture.py
 nzt_session.py (ties it together; CLI first)
 
 Everything else can plug in later.
+
+End-to-end roadmap (personal → production → enterprise)
+
+Personal-grade (solo MVP)
+- Goal: shippable CLI for a single user on one machine.
+- Deliverables: mode router using time-of-day + manual status; WorkOrder persisted locally (JSON); single-thread enforcer guard-rails in CLI; runway_ledger writing newline-delimited JSON; inbox_capture appending to INBOX.txt with tags; nzt_session CLI glue with timers and “return” command; smoke tests covering core paths.
+- Definition of done: run `python nzt_session.py --start` to create a work order, capture inbox items, and append a ledger entry without manual file edits.
+
+Production-grade (team-ready)
+- Goal: reliable daily use by small teams.
+- Deliverables: persisted state in SQLite/Postgres; structured logging + metrics; crash recovery and idempotent ledger writes; background daemon or service API around the six modules; packaging + versioned releases; minimal web/desktop UI surfaces; health checks and basic alerting; onboarding/offboarding workflow for users; backups for ledger and inbox data.
+- Definition of done: deployable service with env-based config, monitored uptime, and repeatable release pipeline that survives restarts without data loss.
+
+Enterprise-grade (org-scale)
+- Goal: compliant, governable deployment across many users/teams.
+- Deliverables: SSO/OAuth2, RBAC (roles for operators, users, admins), encryption at rest/in transit, audit logging of mode switches and work order changes, retention policies for ledger/inbox, PII/secret scanning on persisted artifacts, access controls per workspace, multi-tenant isolation, DR (backups + restore drills), SLOs/SLIs with runbooks, and compliance hooks (SOC2/ISO logging, DPIA-ready data map).
+- Definition of done: security/compliance review passes; least-privilege defaults enforced; tenants isolated; admins can export/delete user data on request.

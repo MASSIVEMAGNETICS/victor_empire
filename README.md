@@ -3,7 +3,7 @@ empire builder
 
 ## Roadmap
 
-The project direction lives in the [roadmap](./roadmap). It outlines Victor’s NZT architecture and the six core modules to ship first:
+The project direction lives in the [roadmap](./roadmap). It outlines Victor’s NZT architecture, the six core modules to ship first, and an end-to-end path from personal-grade MVP to production- and enterprise-grade deployments:
 
 1. victor_nzt_mode_router.py
 2. work_order.py
