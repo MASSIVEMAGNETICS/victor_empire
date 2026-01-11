@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -14,7 +14,7 @@ class WorkOrder:
     next_actions: List[str] = field(default_factory=list)
     blockers: List[str] = field(default_factory=list)
     timebox_minutes: Optional[int] = None
-    id: str = field(default_factory=lambda: f"wo-{int(time.time())}")
+    id: str = field(default_factory=lambda: f"wo-{uuid.uuid4().hex}")
 
     def to_dict(self) -> dict:
         return {
@@ -29,7 +29,7 @@ class WorkOrder:
     @classmethod
     def from_dict(cls, data: dict) -> "WorkOrder":
         return cls(
-            id=data.get("id", f"wo-{int(time.time())}"),
+            id=data.get("id", f"wo-{uuid.uuid4().hex}"),
             goal=data["goal"],
             definition_of_done=data["definition_of_done"],
             next_actions=data.get("next_actions", []),

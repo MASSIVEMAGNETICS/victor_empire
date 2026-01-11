@@ -101,7 +101,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.start:
-        parser.error("No action provided. Use --start to begin a session.")
+        parser.error("No action provided. Only --start is supported in this CLI.")
 
     wo_path = start_session(
         goal=args.goal,

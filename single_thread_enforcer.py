@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Optional
 
@@ -14,7 +15,10 @@ class SingleThreadEnforcer:
     def get_active(self) -> Optional[WorkOrder]:
         if not self.state_path.exists():
             return None
-        data = json.loads(self.state_path.read_text())
+        try:
+            data = json.loads(self.state_path.read_text())
+        except (OSError, JSONDecodeError):
+            return None
         return WorkOrder.from_dict(data)
 
     def set_active(self, work_order: WorkOrder) -> None:
