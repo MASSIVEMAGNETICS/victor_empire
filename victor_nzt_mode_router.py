@@ -28,6 +28,9 @@ def route_mode(
         if normalized in {"focused", "ready", "fresh"}:
             return "DRIVE"
 
+    if tab_switch_pressure is not None:
+        if not 1 <= tab_switch_pressure <= 10:
+            raise ValueError("tab_switch_pressure must be between 1 and 10")
     if tab_switch_pressure is not None and tab_switch_pressure > 6:
         return "RECOVERY"
 

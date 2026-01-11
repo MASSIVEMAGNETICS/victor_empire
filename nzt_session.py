@@ -120,7 +120,9 @@ def main() -> None:
     )
 
     print(f"Started work order at {wo_path}")
-    print("Ledger updated; inbox captured." if args.inbox_items else "Ledger updated.")
+    print("Ledger updated.")
+    if args.inbox_items:
+        print("Inbox captured.")
 
 
 if __name__ == "__main__":
