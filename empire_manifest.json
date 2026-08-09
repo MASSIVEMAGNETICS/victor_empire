@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "canonical_control_plane": "MASSIVEMAGNETICS/victor_empire",
+  "authority_rule": "Only victor_empire canonical state, policy, leases, events, verification receipts, and outcomes are authoritative. External repositories are capability or evidence organs.",
+  "model_sovereignty": "fail-closed",
+  "organs": [
+    {"repo": "MASSIVEMAGNETICS/dev-ville", "role": "verification_evidence", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/victor-prime-agent", "role": "bounded_execution", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/autoresearch-win-rtx-victor", "role": "local_research", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/AGI", "role": "experimental_intelligence", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/supermegaomnirepo", "role": "legacy_archive_and_intake", "integration": "evidence_only"},
+    {"repo": "MASSIVEMAGNETICS/victor-core", "role": "legacy_core_reference", "integration": "evidence_only"},
+    {"repo": "MASSIVEMAGNETICS/Victor_Synthetic_Super_Intelligence", "role": "continuity_research", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/victor-corpus", "role": "corpus_memory_input", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/skills", "role": "capability_catalog", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/income-generator", "role": "revenue_experiment", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/iambandobandz", "role": "public_signal_and_distribution", "integration": "adapter_pending"}
+  ],
+  "closed_loop": [
+    "capture",
+    "work_order",
+    "govern",
+    "lease",
+    "execute",
+    "verify",
+    "commit_outcome",
+    "append_event",
+    "learn_from_state"
+  ]
+}
