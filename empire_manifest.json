@@ -1,10 +1,10 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "canonical_control_plane": "MASSIVEMAGNETICS/victor_empire",
   "authority_rule": "Only victor_empire canonical state, policy, leases, events, verification receipts, and outcomes are authoritative. External repositories are capability or evidence organs.",
   "model_sovereignty": "fail-closed",
   "organs": [
-    {"repo": "MASSIVEMAGNETICS/dev-ville", "role": "verification_evidence", "integration": "adapter_pending"},
+    {"repo": "MASSIVEMAGNETICS/dev-ville", "role": "software_build_and_verification_evidence", "integration": "live_bounded_adapter", "capability": "devville.project.build", "job_schema": "victor.organ.job.v1", "receipt_schema": "victor.organ.receipt.v1"},
     {"repo": "MASSIVEMAGNETICS/victor-prime-agent", "role": "bounded_execution", "integration": "adapter_pending"},
     {"repo": "MASSIVEMAGNETICS/autoresearch-win-rtx-victor", "role": "local_research", "integration": "adapter_pending"},
     {"repo": "MASSIVEMAGNETICS/AGI", "role": "experimental_intelligence", "integration": "adapter_pending"},
@@ -21,8 +21,9 @@
     "work_order",
     "govern",
     "lease",
+    "dispatch_organ",
     "execute",
-    "verify",
+    "verify_receipt_and_artifacts",
     "commit_outcome",
     "append_event",
     "learn_from_state"
