@@ -5,3 +5,8 @@ runway_log.jsonl
 INBOX.txt
 .active_work_order.json
 work_order_*.json
+.victor/
+artifacts/
+*.db
+*.db-wal
+*.db-shm

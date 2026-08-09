@@ -1,0 +1,49 @@
+name: closed-loop
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Smoke test command center CLI
+        run: |
+          python command_center.py --data-dir /tmp/victor-ci --workspace /tmp/victor-artifacts run "CI closed-loop smoke test"
+          python command_center.py --data-dir /tmp/victor-ci --workspace /tmp/victor-artifacts verify-chain
+
+  devville-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Victor control plane
+        uses: actions/checkout@v4
+        with:
+          path: victor_empire
+      - name: Checkout Dev-Ville organ
+        uses: actions/checkout@v4
+        with:
+          repository: MASSIVEMAGNETICS/dev-ville
+          ref: main
+          path: dev-ville
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Probe Dev-Ville organ
+        run: python dev-ville/victor_adapter.py probe
+      - name: Execute real cross-repo closed loop
+        working-directory: victor_empire
+        run: |
+          python command_center.py --devville-root ../dev-ville --data-dir /tmp/victor-cross --workspace /tmp/victor-cross-artifacts run --organ dev-ville "Create a minimal backend API with validation and tests"
+          python command_center.py --devville-root ../dev-ville --data-dir /tmp/victor-cross --workspace /tmp/victor-cross-artifacts verify-chain
