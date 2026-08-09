@@ -5,3 +5,9 @@ runway_log.jsonl
 INBOX.txt
 .active_work_order.json
 work_order_*.json
+victor_kernel.db
+victor_kernel.db-wal
+victor_kernel.db-shm
+*.victor-kernel.db
+*.victor-kernel.db-wal
+*.victor-kernel.db-shm
