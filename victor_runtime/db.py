@@ -69,6 +69,26 @@ CREATE TABLE IF NOT EXISTS organs (
     authority TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS organ_runs (
+    job_id TEXT PRIMARY KEY,
+    organ TEXT NOT NULL,
+    work_order_id TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    status TEXT NOT NULL,
+    receipt_path TEXT,
+    verification_json TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(work_order_id) REFERENCES work_orders(id),
+    FOREIGN KEY(lease_id) REFERENCES leases(id),
+    FOREIGN KEY(organ) REFERENCES organs(name)
+);
+
+CREATE INDEX IF NOT EXISTS organ_runs_by_work_order
+ON organ_runs(work_order_id, created_at);
 """
 
 
