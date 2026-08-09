@@ -10,13 +10,14 @@ from typing import Any
 
 from .db import VictorDB
 from .events import EventLedger, utc_now
+from .organs import DEVVILLE_CAPABILITY, DEVVILLE_ORGAN, DevVilleOrganRunner
 
 
-ALLOWED_CAPABILITIES = {"artifact.write"}
+ALLOWED_CAPABILITIES = {"artifact.write", DEVVILLE_CAPABILITY}
 HOSTED_MODEL_PROVIDERS = {"openai", "anthropic", "google", "gemini", "meta", "mistral"}
 
 DEFAULT_ORGANS = [
-    ("dev-ville", "MASSIVEMAGNETICS/dev-ville", "verification/evidence organ"),
+    ("dev-ville", "MASSIVEMAGNETICS/dev-ville", "software build + verification/evidence organ"),
     ("victor-prime-agent", "MASSIVEMAGNETICS/victor-prime-agent", "bounded execution organ"),
     ("autoresearch-win-rtx-victor", "MASSIVEMAGNETICS/autoresearch-win-rtx-victor", "research organ"),
     ("AGI", "MASSIVEMAGNETICS/AGI", "experimental intelligence organ"),
@@ -30,10 +31,10 @@ class PolicyError(RuntimeError):
 
 
 class VictorKernel:
-    """Canonical control plane.
+    """Canonical Victor control plane.
 
-    External repositories can supply capabilities, but they never own canonical
-    state. SQLite plus the event ledger are authoritative.
+    External repositories can supply bounded capabilities, but they never own
+    canonical state. SQLite plus the hash-chained event ledger are authoritative.
     """
 
     def __init__(
@@ -41,6 +42,7 @@ class VictorKernel:
         *,
         data_dir: str | Path = ".victor",
         workspace: str | Path = "artifacts",
+        devville_root: str | Path | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.workspace = Path(workspace)
@@ -49,6 +51,11 @@ class VictorKernel:
         self.db = VictorDB(self.data_dir / "victor.db")
         self.events = EventLedger(self.db)
         self._register_default_organs()
+        self.devville = DevVilleOrganRunner(
+            data_dir=self.data_dir,
+            workspace=self.workspace,
+            devville_root=devville_root,
+        )
 
     def _register_default_organs(self) -> None:
         now = utc_now()
@@ -65,6 +72,24 @@ class VictorKernel:
                     """,
                     (name, repo, role, "adapter_pending", "capability-only", now),
                 )
+
+    def _set_organ_status(self, name: str, status: str) -> None:
+        with self.db.connect() as conn:
+            row = conn.execute("SELECT status FROM organs WHERE name=?", (name,)).fetchone()
+            if not row:
+                raise KeyError(f"unknown organ: {name}")
+            previous = row["status"]
+            conn.execute(
+                "UPDATE organs SET status=?, updated_at=? WHERE name=?",
+                (status, utc_now(), name),
+            )
+        if previous != status:
+            self.events.append(
+                actor="victor-kernel",
+                action="ORGAN_STATUS_CHANGED",
+                entity_id=name,
+                payload={"previous": previous, "status": status},
+            )
 
     def capture(self, text: str) -> str:
         clean = text.strip()
@@ -125,7 +150,11 @@ class VictorKernel:
                 actor="ethica-governor",
                 action="POLICY_DENIED",
                 entity_id=None,
-                payload={"capability": capability, "provider": provider_normalized, "reason": "VICTOR_MODEL_SOVEREIGNTY"},
+                payload={
+                    "capability": capability,
+                    "provider": provider_normalized,
+                    "reason": "VICTOR_MODEL_SOVEREIGNTY",
+                },
             )
             raise PolicyError("hosted model inference is disabled by VICTOR_MODEL_SOVEREIGNTY")
         if capability not in ALLOWED_CAPABILITIES:
@@ -301,6 +330,64 @@ class VictorKernel:
         )
         return outcome_id
 
+    def _fail_work_order(
+        self,
+        *,
+        work_order_id: str,
+        lease_id: str | None,
+        reason: str,
+    ) -> None:
+        now = utc_now()
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE work_orders SET status='failed', updated_at=? WHERE id=?",
+                (now, work_order_id),
+            )
+            if lease_id:
+                conn.execute(
+                    "UPDATE leases SET status='closed' WHERE id=? AND status='active'",
+                    (lease_id,),
+                )
+        self.events.append(
+            actor="victor-kernel",
+            action="WORK_ORDER_FAILED",
+            entity_id=work_order_id,
+            payload={"lease_id": lease_id, "reason": reason[:4000]},
+        )
+
+    def _record_organ_run(
+        self,
+        *,
+        job_id: str,
+        work_order_id: str,
+        lease_id: str,
+        receipt_path: str,
+        verification: dict[str, Any],
+    ) -> None:
+        now = utc_now()
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO organ_runs(
+                    job_id, organ, work_order_id, lease_id, capability, status,
+                    receipt_path, verification_json, error, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    job_id,
+                    DEVVILLE_ORGAN,
+                    work_order_id,
+                    lease_id,
+                    DEVVILLE_CAPABILITY,
+                    "committed",
+                    receipt_path,
+                    json.dumps(verification, sort_keys=True),
+                    None,
+                    now,
+                    now,
+                ),
+            )
+
     def run_closed_loop(self, goal: str) -> dict[str, Any]:
         inbox_id = self.capture(goal)
         work_order_id = self.create_work_order(goal)
@@ -314,6 +401,7 @@ class VictorKernel:
         )
         chain_ok, event_count, chain_error = self.events.verify()
         return {
+            "organ": "local-worker",
             "inbox_id": inbox_id,
             "work_order_id": work_order_id,
             "lease_id": lease_id,
@@ -322,6 +410,97 @@ class VictorKernel:
             "outcome_id": outcome_id,
             "event_chain": {"ok": chain_ok, "events": event_count, "error": chain_error},
         }
+
+    def run_devville_closed_loop(self, goal: str) -> dict[str, Any]:
+        inbox_id = self.capture(goal)
+        work_order_id = self.create_work_order(
+            goal,
+            "Dev-Ville completes the project and Victor independently verifies the receipt and every artifact digest.",
+        )
+        lease_id: str | None = None
+        try:
+            lease_id = self.issue_lease(
+                work_order_id=work_order_id,
+                capability=DEVVILLE_CAPABILITY,
+                issued_to=DEVVILLE_ORGAN,
+                ttl_seconds=900,
+            )
+            lease = self._lease(lease_id)
+            self.events.append(
+                actor="victor-kernel",
+                action="ORGAN_DISPATCH_REQUESTED",
+                entity_id=work_order_id,
+                payload={
+                    "organ": DEVVILLE_ORGAN,
+                    "capability": DEVVILLE_CAPABILITY,
+                    "lease_id": lease_id,
+                },
+            )
+            dispatch = self.devville.dispatch(
+                work_order_id=work_order_id,
+                lease=lease,
+                directive=goal,
+            )
+            verification = dict(dispatch["verification"])
+            verification["sha256"] = verification["receipt_sha256"]
+            self.events.append(
+                actor="verifier",
+                action="ORGAN_RECEIPT_VERIFIED",
+                entity_id=dispatch["job_id"],
+                payload=verification,
+            )
+            outcome_id = self.commit_outcome(
+                work_order_id=work_order_id,
+                artifact=dispatch["receipt_path"],
+                verification=verification,
+            )
+            self._record_organ_run(
+                job_id=dispatch["job_id"],
+                work_order_id=work_order_id,
+                lease_id=lease_id,
+                receipt_path=dispatch["receipt_path"],
+                verification=verification,
+            )
+            self._set_organ_status(DEVVILLE_ORGAN, "ready")
+            chain_ok, event_count, chain_error = self.events.verify()
+            return {
+                "organ": DEVVILLE_ORGAN,
+                "inbox_id": inbox_id,
+                "work_order_id": work_order_id,
+                "lease_id": lease_id,
+                "job_id": dispatch["job_id"],
+                "receipt": dispatch["receipt_path"],
+                "verification": verification,
+                "outcome_id": outcome_id,
+                "event_chain": {"ok": chain_ok, "events": event_count, "error": chain_error},
+            }
+        except Exception as exc:
+            self._fail_work_order(
+                work_order_id=work_order_id,
+                lease_id=lease_id,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+            self._set_organ_status(DEVVILLE_ORGAN, "degraded")
+            self.events.append(
+                actor="victor-kernel",
+                action="ORGAN_EXECUTION_FAILED",
+                entity_id=work_order_id,
+                payload={
+                    "organ": DEVVILLE_ORGAN,
+                    "capability": DEVVILLE_CAPABILITY,
+                    "error": type(exc).__name__,
+                    "message": str(exc)[:4000],
+                },
+            )
+            raise
+
+    def run_goal(self, goal: str, *, organ: str = "local") -> dict[str, Any]:
+        normalized = organ.strip().lower()
+        if normalized in {"local", "local-worker", "receipt"}:
+            return self.run_closed_loop(goal)
+        if normalized in {"dev-ville", "devville", "dev"}:
+            return self.run_devville_closed_loop(goal)
+        raise PolicyError(f"unknown execution organ: {organ}")
 
     def status(self) -> dict[str, Any]:
         with self.db.connect() as conn:
@@ -332,15 +511,24 @@ class VictorKernel:
                 "SELECT * FROM outcomes ORDER BY created_at DESC LIMIT 5"
             ).fetchall()
             organs = conn.execute("SELECT * FROM organs ORDER BY name").fetchall()
+            organ_runs = conn.execute(
+                "SELECT * FROM organ_runs ORDER BY created_at DESC LIMIT 5"
+            ).fetchall()
             event_count = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
         chain_ok, _, chain_error = self.events.verify()
         return {
             "active_work_order": dict(active) if active else None,
             "recent_outcomes": [dict(row) for row in recent],
+            "recent_organ_runs": [dict(row) for row in organ_runs],
             "organs": [dict(row) for row in organs],
             "events": event_count,
             "event_chain_ok": chain_ok,
             "event_chain_error": chain_error,
             "model_sovereignty": "fail-closed",
             "allowed_capabilities": sorted(ALLOWED_CAPABILITIES),
+            "devville_adapter": {
+                "available": self.devville.available(),
+                "root": str(self.devville.devville_root),
+                "capability": DEVVILLE_CAPABILITY,
+            },
         }
