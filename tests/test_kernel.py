@@ -32,7 +32,7 @@ class KernelTests(unittest.TestCase):
 
     def test_wal_and_foreign_keys(self):
         self.assertEqual(self.kernel.store.journal_mode(), "wal")
-        with self.kernel.store.connect() as connection:
+        with self.kernel.store.connection() as connection:
             self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(connection.execute("PRAGMA synchronous").fetchone()[0], 2)
 
@@ -64,7 +64,7 @@ class KernelTests(unittest.TestCase):
     def test_chronos_detects_event_content_tampering(self):
         work = WorkOrder("preserve history", "tampering detected", "human:bando")
         self.kernel.create_work_order(work, idempotency_key="tamper:create")
-        with self.kernel.store.connect() as connection:
+        with self.kernel.store.connection() as connection:
             connection.execute("UPDATE events SET payload_json = ? WHERE sequence = 1", ('{"goal":"rewritten"}',))
         self.assertFalse(self.kernel.verify_chronos())
 
@@ -102,7 +102,7 @@ class KernelTests(unittest.TestCase):
             crashing.create_work_order(work, idempotency_key="crash:create")
 
         recovered = VictorKernel(self.db)
-        with recovered.store.connect() as connection:
+        with recovered.store.connection() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0], 0)
         recovered.create_work_order(work, idempotency_key="crash:create")
@@ -115,7 +115,7 @@ class KernelTests(unittest.TestCase):
         self.kernel.create_work_order(first, idempotency_key="same-request")
         observed = self.kernel.create_work_order(second, idempotency_key="same-request")
         self.assertEqual(observed.work_order_id, first.work_order_id)
-        with self.kernel.store.connect() as connection:
+        with self.kernel.store.connection() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
 
     def test_lease_transaction_is_atomic_across_crash(self):
@@ -135,7 +135,7 @@ class KernelTests(unittest.TestCase):
 
         recovered = VictorKernel(self.db)
         self.assertEqual(recovered.get_work_order(work.work_order_id).status, WorkOrderStatus.AUTHORIZED)
-        with recovered.store.connect() as connection:
+        with recovered.store.connection() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM capability_leases").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
         self.assertTrue(recovered.verify_chronos())
@@ -154,7 +154,7 @@ class KernelTests(unittest.TestCase):
         self.kernel.start_execution(
             work.work_order_id, lease.lease_id, actor_id="worker:authorized", idempotency_key="run:authorized"
         )
-        with self.kernel.store.connect() as connection:
+        with self.kernel.store.connection() as connection:
             row = connection.execute(
                 "SELECT uses, status FROM capability_leases WHERE lease_id = ?", (lease.lease_id,)
             ).fetchone()

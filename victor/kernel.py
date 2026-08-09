@@ -313,14 +313,14 @@ class VictorKernel:
             return replace(current, status=target)
 
     def get_work_order(self, work_order_id: str) -> WorkOrder:
-        with self.store.connect() as connection:
+        with self.store.connection() as connection:
             return self._get_work_order(connection, work_order_id)
 
     def verify_chronos(self) -> bool:
         from .chronos import build_receipt
         from .protocol import Informatron
 
-        with self.store.connect() as connection:
+        with self.store.connection() as connection:
             rows = connection.execute(
                 "SELECT e.*, c.previous_chain_hash, c.chain_hash FROM events e JOIN chronos_receipts c USING(sequence) ORDER BY sequence"
             ).fetchall()

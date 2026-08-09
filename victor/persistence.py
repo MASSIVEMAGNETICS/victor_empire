@@ -145,7 +145,7 @@ class VictorStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def connect(self) -> sqlite3.Connection:
+    def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -153,15 +153,24 @@ class VictorStore:
         connection.execute("PRAGMA synchronous = FULL")
         return connection
 
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """Yield a read connection and always release its Windows file handle."""
+        connection = self._connect()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
     def _initialize(self) -> None:
-        with self.connect() as connection:
+        with self.connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
             connection.executescript(SCHEMA_SQL)
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        connection = self.connect()
+        connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             yield connection
@@ -234,5 +243,5 @@ class VictorStore:
         )
 
     def journal_mode(self) -> str:
-        with self.connect() as connection:
+        with self.connection() as connection:
             return str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
