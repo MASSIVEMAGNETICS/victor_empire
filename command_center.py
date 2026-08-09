@@ -18,9 +18,9 @@ HTML = """<!doctype html>
 <style>
 body{font-family:system-ui,sans-serif;background:#0b0d10;color:#e8eef2;max-width:1000px;margin:0 auto;padding:24px}
 h1{margin-bottom:4px}.sub{color:#94a3b8;margin-top:0}.panel{background:#131820;border:1px solid #273244;border-radius:14px;padding:18px;margin:16px 0}
-textarea{width:100%;min-height:100px;background:#090c10;color:#fff;border:1px solid #334155;border-radius:10px;padding:12px;box-sizing:border-box}
-button{background:#fff;color:#000;border:0;border-radius:10px;padding:11px 16px;font-weight:700;margin-top:10px}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#090c10;padding:14px;border-radius:10px}
+textarea,select{width:100%;background:#090c10;color:#fff;border:1px solid #334155;border-radius:10px;padding:12px;box-sizing:border-box}
+textarea{min-height:100px}select{margin-top:10px}button{background:#fff;color:#000;border:0;border-radius:10px;padding:11px 16px;font-weight:700;margin-top:10px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#090c10;padding:14px;border-radius:10px}.hint{font-size:.9rem;color:#94a3b8}
 </style>
 </head>
 <body>
@@ -28,8 +28,13 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#090c10;padding:14px;
 <p class="sub">Canonical state • governed execution • verification • continuity</p>
 <div class="panel">
   <h2>Command</h2>
-  <textarea id="cmd" placeholder="Type an objective. Example: Produce today's highest-leverage execution receipt."></textarea>
-  <button onclick="runCommand()">Execute closed loop</button>
+  <textarea id="cmd" placeholder="Type an objective. Example: Build a minimal backend service with validation and tests."></textarea>
+  <select id="organ">
+    <option value="local">Local receipt worker</option>
+    <option value="dev-ville">Dev-Ville software organ</option>
+  </select>
+  <p class="hint">Execution organ selection is explicit. Victor does not silently route a command to a more powerful capability.</p>
+  <button onclick="runCommand()">Execute governed loop</button>
 </div>
 <div class="panel">
   <h2>System state</h2>
@@ -46,8 +51,9 @@ async function refresh(){
 }
 async function runCommand(){
   const command=document.getElementById('cmd').value.trim();
+  const organ=document.getElementById('organ').value;
   if(!command)return;
-  const r=await fetch('/api/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({command})});
+  const r=await fetch('/api/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({command,organ})});
   const j=await r.json();
   document.getElementById('result').textContent=JSON.stringify(j,null,2);
   await refresh();
@@ -93,6 +99,7 @@ def make_handler(kernel: VictorKernel):
                 raw = self.rfile.read(length)
                 data = json.loads(raw.decode("utf-8"))
                 command = str(data.get("command", "")).strip()
+                organ = str(data.get("organ", "local")).strip()
                 if not command:
                     raise ValueError("command is required")
                 if command.lower() == "status":
@@ -101,7 +108,7 @@ def make_handler(kernel: VictorKernel):
                     ok, count, error = kernel.events.verify()
                     result = {"ok": ok, "events": count, "error": error}
                 else:
-                    result = kernel.run_closed_loop(command)
+                    result = kernel.run_goal(command, organ=organ)
                 self._json(200, result)
             except Exception as exc:
                 self._json(400, {"error": type(exc).__name__, "message": str(exc)})
@@ -116,14 +123,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Victor Command Center")
     parser.add_argument("--data-dir", default=".victor")
     parser.add_argument("--workspace", default="artifacts")
+    parser.add_argument(
+        "--devville-root",
+        default=None,
+        help="Path to a dev-ville checkout containing victor_adapter.py. Defaults to sibling ../dev-ville or VICTOR_DEVVILLE_ROOT.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="Run the local command center")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8787)
 
-    run = sub.add_parser("run", help="Execute one closed loop")
+    run = sub.add_parser("run", help="Execute one governed closed loop")
     run.add_argument("goal")
+    run.add_argument("--organ", choices=("local", "dev-ville"), default="local")
 
     sub.add_parser("status", help="Show canonical runtime state")
     sub.add_parser("verify-chain", help="Verify the hash-chained event ledger")
@@ -132,14 +145,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    kernel = VictorKernel(data_dir=Path(args.data_dir), workspace=Path(args.workspace))
+    kernel = VictorKernel(
+        data_dir=Path(args.data_dir),
+        workspace=Path(args.workspace),
+        devville_root=Path(args.devville_root) if args.devville_root else None,
+    )
 
     if args.command == "serve":
         server = ThreadingHTTPServer((args.host, args.port), make_handler(kernel))
         print(f"Victor Command Center: http://{args.host}:{args.port}")
         server.serve_forever()
     elif args.command == "run":
-        print(json.dumps(kernel.run_closed_loop(args.goal), indent=2))
+        print(json.dumps(kernel.run_goal(args.goal, organ=args.organ), indent=2))
     elif args.command == "status":
         print(json.dumps(kernel.status(), indent=2))
     elif args.command == "verify-chain":
