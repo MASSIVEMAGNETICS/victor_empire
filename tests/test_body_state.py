@@ -94,10 +94,63 @@ class BodyStateTests(unittest.TestCase):
         )
         state = self.body.snapshot()
         self.assertEqual(state.blocked_organs, ("memory",))
+        self.assertEqual(state.unknown_authority_organs, ())
         self.assertEqual(state.degraded_organs, ("memory",))
         self.assertEqual(state.recovering_organs, ("ethica",))
+        self.assertEqual(state.unverified_organs, ())
         self.assertEqual(state.unknown_organs, ())
         self.assertAlmostEqual(state.salience, 0.95)
+        self.assertFalse(state.stable)
+
+    def test_unknown_authority_is_not_stable(self) -> None:
+        body = BodyStateAggregator([OrganDescriptor("dev-ville")])
+        body.ingest(
+            OrganSignal(
+                "dev-ville",
+                health=1.0,
+                confidence=1.0,
+                load=0.0,
+                salience=0.25,
+                authority=AuthorityState.UNKNOWN,
+                continuity=ContinuityState.VERIFIED,
+            )
+        )
+        state = body.snapshot()
+        self.assertEqual(state.unknown_authority_organs, ("dev-ville",))
+        self.assertFalse(state.stable)
+
+    def test_unverified_continuity_is_not_stable(self) -> None:
+        body = BodyStateAggregator([OrganDescriptor("dev-ville")])
+        body.ingest(
+            OrganSignal(
+                "dev-ville",
+                health=1.0,
+                confidence=1.0,
+                load=0.0,
+                salience=0.25,
+                authority=AuthorityState.ACTIVE,
+                continuity=ContinuityState.UNVERIFIED,
+            )
+        )
+        state = body.snapshot()
+        self.assertEqual(state.unverified_organs, ("dev-ville",))
+        self.assertFalse(state.stable)
+
+    def test_recovering_continuity_is_not_stable(self) -> None:
+        body = BodyStateAggregator([OrganDescriptor("dev-ville")])
+        body.ingest(
+            OrganSignal(
+                "dev-ville",
+                health=1.0,
+                confidence=1.0,
+                load=0.0,
+                salience=0.25,
+                authority=AuthorityState.RESTRICTED,
+                continuity=ContinuityState.RECOVERING,
+            )
+        )
+        state = body.snapshot()
+        self.assertEqual(state.recovering_organs, ("dev-ville",))
         self.assertFalse(state.stable)
 
     def test_signal_validation_is_fail_closed(self) -> None:
@@ -120,6 +173,26 @@ class BodyStateTests(unittest.TestCase):
                 salience=0.5,
                 authority=AuthorityState.ACTIVE,
                 continuity=ContinuityState.VERIFIED,
+            )
+        with self.assertRaisesRegex(TypeError, "AuthorityState"):
+            OrganSignal(
+                "memory",
+                health=1.0,
+                confidence=1.0,
+                load=0.0,
+                salience=0.5,
+                authority="active",  # type: ignore[arg-type]
+                continuity=ContinuityState.VERIFIED,
+            )
+        with self.assertRaisesRegex(TypeError, "ContinuityState"):
+            OrganSignal(
+                "memory",
+                health=1.0,
+                confidence=1.0,
+                load=0.0,
+                salience=0.5,
+                authority=AuthorityState.ACTIVE,
+                continuity="verified",  # type: ignore[arg-type]
             )
 
     def test_snapshot_digest_is_deterministic_and_order_independent(self) -> None:
