@@ -1,7 +1,7 @@
 """Bounded organism-level body-state projection for Victor.
 
 This module deliberately exposes state *about* Victor's organs without exposing
-or executing their internal implementation.  It is an interoception boundary,
+or executing their internal implementation. It is an interoception boundary,
 not a new authority path: callers register known organs, submit validated
 signals, and receive a deterministic summary suitable for higher-level
 cognition, GEV display, or verification receipts.
@@ -79,6 +79,10 @@ class OrganSignal:
             if not math.isfinite(value) or not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be within [0.0, 1.0]")
             object.__setattr__(self, name, value)
+        if not isinstance(self.authority, AuthorityState):
+            raise TypeError("authority must be an AuthorityState")
+        if not isinstance(self.continuity, ContinuityState):
+            raise TypeError("continuity must be a ContinuityState")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,20 +96,38 @@ class BodyState:
     load: float
     salience: float
     blocked_organs: tuple[str, ...]
+    unknown_authority_organs: tuple[str, ...]
     degraded_organs: tuple[str, ...]
     recovering_organs: tuple[str, ...]
+    unverified_organs: tuple[str, ...]
     unknown_organs: tuple[str, ...]
     digest_sha256: str
 
     @property
     def stable(self) -> bool:
-        return not self.blocked_organs and not self.degraded_organs and not self.unknown_organs
+        """Return true only when every registered organ reports governed, verified state.
+
+        ``UNKNOWN`` authority and ``UNVERIFIED``/``RECOVERING`` continuity are
+        deliberately not treated as healthy silence. A read-only observer may
+        display those states, but it cannot upgrade them into organism stability.
+        """
+
+        return not any(
+            (
+                self.blocked_organs,
+                self.unknown_authority_organs,
+                self.degraded_organs,
+                self.recovering_organs,
+                self.unverified_organs,
+                self.unknown_organs,
+            )
+        )
 
 
 class BodyStateAggregator:
     """Maintains the bounded self perimeter and projects body-level state.
 
-    Registration is explicit.  A signal from an unregistered organ is rejected
+    Registration is explicit. A signal from an unregistered organ is rejected
     rather than silently enlarging Victor's sense of self.
     """
 
@@ -144,11 +166,17 @@ class BodyStateAggregator:
         blocked = tuple(
             signal.organ_id for signal in signals if signal.authority is AuthorityState.BLOCKED
         )
+        unknown_authority = tuple(
+            signal.organ_id for signal in signals if signal.authority is AuthorityState.UNKNOWN
+        )
         degraded = tuple(
             signal.organ_id for signal in signals if signal.continuity is ContinuityState.DEGRADED
         )
         recovering = tuple(
             signal.organ_id for signal in signals if signal.continuity is ContinuityState.RECOVERING
+        )
+        unverified = tuple(
+            signal.organ_id for signal in signals if signal.continuity is ContinuityState.UNVERIFIED
         )
 
         payload = {
@@ -159,8 +187,10 @@ class BodyStateAggregator:
             "load": load,
             "salience": salience,
             "blocked_organs": blocked,
+            "unknown_authority_organs": unknown_authority,
             "degraded_organs": degraded,
             "recovering_organs": recovering,
+            "unverified_organs": unverified,
             "unknown_organs": unknown,
             "signals": [asdict(signal) for signal in signals],
         }
@@ -175,8 +205,10 @@ class BodyStateAggregator:
             load=load,
             salience=salience,
             blocked_organs=blocked,
+            unknown_authority_organs=unknown_authority,
             degraded_organs=degraded,
             recovering_organs=recovering,
+            unverified_organs=unverified,
             unknown_organs=unknown,
             digest_sha256=digest,
         )
