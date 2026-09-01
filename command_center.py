@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from command_center_interoception import project_devville_body_state
 from victor_runtime import VictorKernel
 
 
@@ -65,6 +66,19 @@ refresh();
 """
 
 
+def command_center_status(kernel: VictorKernel) -> dict:
+    """Return canonical status plus observation-only interoception.
+
+    Interoception is deliberately computed outside ``VictorKernel.status()`` so
+    reading the Command Center cannot mutate canonical state or gain an implicit
+    execution path. Authority remains unresolved in this read-only projection.
+    """
+
+    status = dict(kernel.status())
+    status["interoception"] = project_devville_body_state(kernel.devville)
+    return status
+
+
 def make_handler(kernel: VictorKernel):
     class Handler(BaseHTTPRequestHandler):
         def _json(self, code: int, payload: dict) -> None:
@@ -86,7 +100,7 @@ def make_handler(kernel: VictorKernel):
                 self.wfile.write(body)
                 return
             if path == "/api/status":
-                self._json(200, kernel.status())
+                self._json(200, command_center_status(kernel))
                 return
             self._json(404, {"error": "not found"})
 
@@ -103,7 +117,7 @@ def make_handler(kernel: VictorKernel):
                 if not command:
                     raise ValueError("command is required")
                 if command.lower() == "status":
-                    result = kernel.status()
+                    result = command_center_status(kernel)
                 elif command.lower() in {"verify", "verify chain", "verify-chain"}:
                     ok, count, error = kernel.events.verify()
                     result = {"ok": ok, "events": count, "error": error}
@@ -138,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("goal")
     run.add_argument("--organ", choices=("local", "dev-ville"), default="local")
 
-    sub.add_parser("status", help="Show canonical runtime state")
+    sub.add_parser("status", help="Show canonical runtime state plus read-only organ interoception")
     sub.add_parser("verify-chain", help="Verify the hash-chained event ledger")
     return parser
 
@@ -158,7 +172,7 @@ def main() -> None:
     elif args.command == "run":
         print(json.dumps(kernel.run_goal(args.goal, organ=args.organ), indent=2))
     elif args.command == "status":
-        print(json.dumps(kernel.status(), indent=2))
+        print(json.dumps(command_center_status(kernel), indent=2))
     elif args.command == "verify-chain":
         ok, count, error = kernel.events.verify()
         print(json.dumps({"ok": ok, "events": count, "error": error}, indent=2))
