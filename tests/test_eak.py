@@ -83,6 +83,50 @@ class EAKTests(unittest.TestCase):
         with self.assertRaises(EAKError): eak.run(task)
         self.assertTrue(eak.human_stop())
 
+    def test_human_stop_during_executor_cannot_be_overwritten_closed(self):
+        root,v,eak=self.env()
+        def executor(payload):
+            eak.set_human_stop(True,actor="BANDO",reason="during-executor")
+            return {"value":payload.get("value"),"rollback":{"ok":True}}
+        eak.register(
+            Capability("stop.race","software",Authority.A2_REVERSIBLE,("manual",),"test",True,True),
+            executor=executor,
+            verifier=lambda p,r: True,
+        )
+        task=eak.trigger("stop.race","manual",{"value":1}); self.score(eak,task)
+        with self.assertRaises(EAKError): eak.run(task)
+        with v.db.connect() as c:
+            state=c.execute("SELECT state FROM eak_tasks WHERE id=?",(task,)).fetchone()["state"]
+            receipts=c.execute("SELECT COUNT(*) n FROM eak_receipts WHERE task_id=?",(task,)).fetchone()["n"]
+        self.assertEqual(state,"ABORTED"); self.assertEqual(receipts,0)
+
+    def test_human_stop_during_verifier_cannot_commit_receipt(self):
+        root,v,eak=self.env()
+        def verifier(payload,result):
+            eak.set_human_stop(True,actor="TORI",reason="during-verifier")
+            return True
+        eak.register(
+            Capability("stop.verify","software",Authority.A2_REVERSIBLE,("manual",),"test",True,True),
+            executor=lambda p: {"rollback":{"ok":True}},
+            verifier=verifier,
+        )
+        task=eak.trigger("stop.verify","manual"); self.score(eak,task)
+        with self.assertRaises(EAKError): eak.run(task)
+        with v.db.connect() as c:
+            state=c.execute("SELECT state FROM eak_tasks WHERE id=?",(task,)).fetchone()["state"]
+            receipts=c.execute("SELECT COUNT(*) n FROM eak_receipts WHERE task_id=?",(task,)).fetchone()["n"]
+        self.assertEqual(state,"ABORTED"); self.assertEqual(receipts,0)
+
+    def test_deactivated_capability_blocks_already_scored_task(self):
+        root,v,eak=self.env(); calls=[]
+        cap=Capability("revoked","software",Authority.A2_REVERSIBLE,("manual",),"test",True,True)
+        eak.register(cap,executor=lambda p: calls.append(1) or {"rollback":{"ok":True}},verifier=lambda p,r: True)
+        task=eak.trigger("revoked","manual"); self.score(eak,task)
+        eak.register(Capability("revoked","software",Authority.A2_REVERSIBLE,("manual",),"test",True,False))
+        with self.assertRaises(EAKError): eak.run(task)
+        self.assertEqual(calls,[])
+        self.assertEqual(eak.status()["recent_tasks"][0]["state"],"ABORTED")
+
     def test_non_sovereign_cannot_toggle_stop(self):
         root,v,eak=self.env()
         with self.assertRaises(EAKError): eak.set_human_stop(True,actor="worker")
