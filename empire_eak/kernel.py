@@ -212,6 +212,9 @@ class EmpireAutonomyKernel:
             self._finish(task_id, "ABORTED", "human_stop")
             raise EAKError("Human STOP active")
         task = self._task(task_id)
+        if not task["active"]:
+            self._finish(task_id, "ABORTED", "capability inactive")
+            raise EAKError("capability inactive")
         authority = Authority(task["authority"])
         if authority >= Authority.A3_CONSEQUENTIAL:
             self._finish(task_id, "ABORTED", "A3-A5 disabled in EAK v0.1")
@@ -231,6 +234,13 @@ class EmpireAutonomyKernel:
             result = executor(payload)
             if not isinstance(result, dict):
                 raise EAKError("executor result must be dict")
+            if self.human_stop():
+                raise EAKError("Human STOP active")
+            current = self._task(task_id)
+            if not current["active"]:
+                raise EAKError("capability inactive")
+            if current["state"] == "ABORTED":
+                raise EAKError("task aborted")
             if authority >= Authority.A2_REVERSIBLE and task["rollback_required"] and not result.get("rollback"):
                 raise EAKError("rollback evidence required")
             self._finish(task_id, "VERIFYING")
@@ -238,22 +248,46 @@ class EmpireAutonomyKernel:
                 raise EAKError("verification failed")
             receipt_id = f"eakr-{uuid.uuid4().hex}"
             with self.db.connect() as c:
+                c.execute("BEGIN IMMEDIATE")
+                gate = c.execute(
+                    "SELECT t.state,c.active,s.value AS human_stop "
+                    "FROM eak_tasks t "
+                    "JOIN eak_capabilities c ON c.id=t.capability_id "
+                    "JOIN eak_state s ON s.key='human_stop' WHERE t.id=?",
+                    (task_id,),
+                ).fetchone()
+                if not gate or gate["state"] != "VERIFYING":
+                    raise EAKError("task no longer eligible to close")
+                if not gate["active"]:
+                    raise EAKError("capability inactive")
+                if gate["human_stop"] == "1":
+                    raise EAKError("Human STOP active")
                 c.execute(
                     "INSERT INTO eak_receipts VALUES(?,?,?,?,?)",
                     (receipt_id, task_id, "verification",
                      json.dumps(result, sort_keys=True), utc_now()),
                 )
-                c.execute(
-                    "UPDATE eak_tasks SET result_json=?,state='CLOSED',updated_at=? WHERE id=?",
+                changed = c.execute(
+                    "UPDATE eak_tasks SET result_json=?,state='CLOSED',updated_at=? "
+                    "WHERE id=? AND state='VERIFYING'",
                     (json.dumps(result, sort_keys=True), utc_now(), task_id),
                 )
+                if changed.rowcount != 1:
+                    raise EAKError("task close lost eligibility")
             self.events.append(
                 actor="eak", action="RECEIPT_COMMITTED", entity_id=receipt_id,
                 payload={"task_id": task_id, "kind": "verification"},
             )
             return {"task_id": task_id, "state": "CLOSED", "receipt_id": receipt_id, "result": result}
         except Exception as exc:
-            self._finish(task_id, "QUARANTINED", f"{type(exc).__name__}: {exc}"[:4000])
+            if self.human_stop():
+                self._finish(task_id, "ABORTED", "human_stop")
+            else:
+                current = self._task(task_id)
+                if not current["active"] or current["state"] == "ABORTED":
+                    self._finish(task_id, "ABORTED", str(exc)[:4000])
+                else:
+                    self._finish(task_id, "QUARANTINED", f"{type(exc).__name__}: {exc}"[:4000])
             raise
 
     def status(self) -> dict[str, Any]:
