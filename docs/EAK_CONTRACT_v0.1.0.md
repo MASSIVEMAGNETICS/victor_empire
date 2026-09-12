@@ -8,12 +8,13 @@ Status: canonical candidate. This change does not supersede `victor_runtime.Vict
 2. Every autonomous ability must be registered before it can receive a task.
 3. EAK v0.1 may execute only A0–A2 capabilities. A3–A5 fail closed.
 4. A5 sovereign actions are never autonomous.
-5. Human STOP may be set or cleared only by BANDO or TORI and blocks execution.
-6. A2 reversible execution must return rollback evidence.
-7. Every successful task must pass an explicit verifier and commit an immutable EAK receipt.
-8. Failed verification is quarantined, not promoted.
-9. Capability contracts cannot mutate in place; a changed contract requires a new capability id/version.
-10. The existing Victor event ledger records EAK task/receipt transitions.
+5. Human STOP may be set or cleared only by BANDO or TORI and blocks execution, verification promotion, and receipt finalization.
+6. Capability deactivation is authoritative for already-triggered work: a task cannot begin or finalize after its capability becomes inactive.
+7. A2 reversible execution must return rollback evidence.
+8. Every successful task must pass an explicit verifier and commit an immutable EAK receipt.
+9. Failed verification is quarantined, not promoted.
+10. Capability contracts cannot mutate in place; a changed contract requires a new capability id/version.
+11. The existing Victor event ledger records EAK task/receipt transitions.
 
 ## Authority classes
 
@@ -31,6 +32,10 @@ Status: canonical candidate. This change does not supersede `victor_runtime.Vict
 Failure transitions are fail-closed to `ABORTED` or `QUARANTINED`.
 
 A task executes only if its registered capability is active, its trigger is registered, Human STOP is clear, its score is >= 0.62, its authority is <= A2, its executor exists, and its verifier passes.
+
+Human STOP and capability activity are not one-time admission checks. EAK re-checks them after executor return and serializes final receipt/task closure behind a SQLite `BEGIN IMMEDIATE` finalization gate. A STOP or capability revocation that wins before that finalization transaction prevents the task from being promoted to `CLOSED` or receiving a verification receipt. If closure wins first, a later STOP applies to subsequent/in-flight work rather than retroactively invalidating an already committed receipt.
+
+This v0.1 contract does not claim hard preemption of arbitrary Python executor code at the instruction level. Executors therefore remain limited to A0–A2 bounded/reversible work; stronger consequence-producing capabilities require a separately reviewed killable execution substrate before promotion.
 
 ## B Heard paid-intake sandbox
 
