@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
+import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -39,6 +41,110 @@ class EAKTests(unittest.TestCase):
         out=eak.run(task); self.assertEqual(out["state"],"CLOSED")
         with v.db.connect() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) n FROM eak_receipts").fetchone()["n"],1)
+        self.assertEqual(v.events.verify(), (True, 6, None))
+
+    def test_closed_task_cannot_execute_twice_or_gain_second_receipt(self):
+        root,v,eak=self.env(); calls=[]
+        eak.register(
+            Capability("once","software",Authority.A2_REVERSIBLE,("manual",),"test"),
+            executor=lambda p: calls.append(1) or {"rollback":{"ok":True}},
+            verifier=lambda p,r: True,
+        )
+        task=eak.trigger("once","manual"); self.score(eak,task)
+        eak.run(task)
+        with self.assertRaisesRegex(EAKError,"cannot execute from state CLOSED"):
+            eak.run(task)
+        with v.db.connect() as c:
+            state=c.execute("SELECT state FROM eak_tasks WHERE id=?",(task,)).fetchone()["state"]
+            receipts=c.execute("SELECT COUNT(*) n FROM eak_receipts WHERE task_id=?",(task,)).fetchone()["n"]
+        self.assertEqual(calls,[1]); self.assertEqual(receipts,1); self.assertEqual(state,"CLOSED")
+
+    def test_terminal_task_cannot_be_rescored(self):
+        root,v,eak=self.env(); self.safe(eak)
+        task=eak.trigger("test.safe","manual",{"value":1}); self.score(eak,task); eak.run(task)
+        with self.assertRaisesRegex(EAKError,"cannot be scored from state CLOSED"):
+            self.score(eak,task)
+        self.assertEqual(eak.status()["recent_tasks"][0]["state"],"CLOSED")
+
+    def test_database_enforces_terminal_state_and_single_receipt(self):
+        root,v,eak=self.env(); self.safe(eak)
+        task=eak.trigger("test.safe","manual",{"value":1}); self.score(eak,task)
+        out=eak.run(task)
+        with self.assertRaisesRegex(sqlite3.IntegrityError,"terminal tasks immutable"):
+            with v.db.connect() as c:
+                c.execute("UPDATE eak_tasks SET state='SCORED' WHERE id=?",(task,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            with v.db.connect() as c:
+                c.execute(
+                    "INSERT INTO eak_receipts VALUES(?,?,?,?,?)",
+                    ("duplicate",task,"verification","{}","now"),
+                )
+        self.assertEqual(eak._task(task)["state"],"CLOSED")
+        self.assertEqual(out["state"],"CLOSED")
+
+    def test_caller_cannot_lower_trusted_score_floor(self):
+        root,v,eak=self.env(); calls=[]
+        eak.register(
+            Capability("floor","software",Authority.A2_REVERSIBLE,("manual",),"test"),
+            executor=lambda p: calls.append(1) or {"rollback":{"ok":True}},
+            verifier=lambda p,r: True,
+        )
+        task=eak.trigger("floor","manual"); self.score(eak,task,False)
+        with self.assertRaisesRegex(ValueError,"trusted floor"):
+            eak.run(task,minimum_score=0)
+        self.assertEqual(calls,[])
+        self.assertEqual(eak.status()["recent_tasks"][0]["state"],"SCORED")
+
+    def test_stop_transaction_that_wins_before_admission_blocks_executor(self):
+        root,v,eak=self.env(); calls=[]; outcome=[]
+        eak.register(
+            Capability("stop.admit","software",Authority.A2_REVERSIBLE,("manual",),"test"),
+            executor=lambda p: calls.append(1) or {"rollback":{"ok":True}},
+            verifier=lambda p,r: True,
+        )
+        task=eak.trigger("stop.admit","manual"); self.score(eak,task)
+
+        def runner():
+            try: eak.run(task)
+            except Exception as exc: outcome.append(exc)
+
+        with v.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("UPDATE eak_state SET value='1' WHERE key='human_stop'")
+            c.execute(
+                "UPDATE eak_tasks SET state='ABORTED',error='human_stop' WHERE id=?",
+                (task,),
+            )
+            thread=threading.Thread(target=runner); thread.start(); time.sleep(.05)
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(outcome); self.assertEqual(calls,[])
+        self.assertEqual(eak.status()["recent_tasks"][0]["state"],"ABORTED")
+
+    def test_receipt_event_failure_rolls_back_receipt_and_close(self):
+        root,v,eak=self.env(); self.safe(eak)
+        task=eak.trigger("test.safe","manual",{"value":1}); self.score(eak,task)
+        original=eak.events.append_in_transaction
+        def fail_receipt_event(conn,**kwargs):
+            if kwargs.get("action") == "RECEIPT_COMMITTED":
+                raise RuntimeError("injected event failure")
+            return original(conn,**kwargs)
+        eak.events.append_in_transaction=fail_receipt_event
+        with self.assertRaisesRegex(RuntimeError,"injected event failure"):
+            eak.run(task)
+        with v.db.connect() as c:
+            state=c.execute("SELECT state FROM eak_tasks WHERE id=?",(task,)).fetchone()["state"]
+            receipts=c.execute("SELECT COUNT(*) n FROM eak_receipts WHERE task_id=?",(task,)).fetchone()["n"]
+        self.assertEqual(state,"QUARANTINED"); self.assertEqual(receipts,0)
+
+    def test_capability_callable_rebind_requires_new_version(self):
+        root,v,eak=self.env()
+        first=lambda p: {"rollback":{"ok":True}}
+        verifier=lambda p,r: True
+        cap=Capability("bound","software",Authority.A2_REVERSIBLE,("manual",),"test")
+        eak.register(cap,executor=first,verifier=verifier)
+        with self.assertRaisesRegex(EAKError,"executor rebind denied"):
+            eak.register(cap,executor=lambda p: {"rollback":{"ok":True}},verifier=verifier)
 
     def test_a5_active_registration_denied(self):
         root,v,eak=self.env()

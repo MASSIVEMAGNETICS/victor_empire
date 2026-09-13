@@ -8,13 +8,17 @@ Status: canonical candidate. This change does not supersede `victor_runtime.Vict
 2. Every autonomous ability must be registered before it can receive a task.
 3. EAK v0.1 may execute only A0–A2 capabilities. A3–A5 fail closed.
 4. A5 sovereign actions are never autonomous.
-5. Human STOP may be set or cleared only by BANDO or TORI and blocks execution, verification promotion, and receipt finalization.
+5. The API accepts only BANDO or TORI actor labels for Human STOP, and STOP blocks execution admission, verification promotion, and receipt finalization. Actor-label authentication is not implemented by this repository and remains a promotion blocker.
 6. Capability deactivation is authoritative for already-triggered work: a task cannot begin or finalize after its capability becomes inactive.
 7. A2 reversible execution must return rollback evidence.
 8. Every successful task must pass an explicit verifier and commit an immutable EAK receipt.
 9. Failed verification is quarantined, not promoted.
 10. Capability contracts cannot mutate in place; a changed contract requires a new capability id/version.
 11. The existing Victor event ledger records EAK task/receipt transitions.
+12. The trusted score floor is 0.62. Callers may request a stricter threshold but cannot lower the floor.
+13. `CLOSED`, `ABORTED`, and `QUARANTINED` tasks are terminal and immutable. Each task may receive at most one verification receipt.
+14. Capability executor and verifier callables cannot be rebound in-process under an existing capability id; a new implementation requires a new capability version.
+15. Task-state changes and their provenance events commit in the same SQLite transaction.
 
 ## Authority classes
 
@@ -33,9 +37,13 @@ Failure transitions are fail-closed to `ABORTED` or `QUARANTINED`.
 
 A task executes only if its registered capability is active, its trigger is registered, Human STOP is clear, its score is >= 0.62, its authority is <= A2, its executor exists, and its verifier passes.
 
-Human STOP and capability activity are not one-time admission checks. EAK re-checks them after executor return and serializes final receipt/task closure behind a SQLite `BEGIN IMMEDIATE` finalization gate. A STOP or capability revocation that wins before that finalization transaction prevents the task from being promoted to `CLOSED` or receiving a verification receipt. If closure wins first, a later STOP applies to subsequent/in-flight work rather than retroactively invalidating an already committed receipt.
+Scoring is an exact `TRIGGERED -> SCORED` compare-and-set. Execution admission is an exact `SCORED -> EXECUTING` transition inside a SQLite `BEGIN IMMEDIATE` transaction that checks Human STOP, capability activity, authority, the policy-owned score floor, and callback availability. Verification admission and receipt closure use equivalent guarded transitions. A terminal task cannot be re-scored or replayed, and a database uniqueness constraint permits only one verification receipt per task.
+
+Human STOP and capability activity are not one-time admission checks. EAK re-checks them after executor return and serializes final receipt/task closure behind a SQLite `BEGIN IMMEDIATE` finalization gate. A STOP or capability revocation that wins before execution admission prevents the executor from starting. A STOP or revocation that wins before finalization prevents the task from being promoted to `CLOSED` or receiving a verification receipt. Receipt insertion, task closure, and the `RECEIPT_COMMITTED` event are atomic. If closure wins first, a later STOP applies to subsequent/in-flight work rather than retroactively invalidating an already committed receipt.
 
 This v0.1 contract does not claim hard preemption of arbitrary Python executor code at the instruction level. Executors therefore remain limited to A0–A2 bounded/reversible work; stronger consequence-producing capabilities require a separately reviewed killable execution substrate before promotion.
+
+This repository also does not authenticate the BANDO/TORI actor string accepted by Human STOP and sandbox approval APIs. Those interfaces are labels, not owner credentials. Production promotion requires a separately approved, tested authority-verification boundary; no caller-supplied actor label may be treated as proof of human approval.
 
 ## B Heard paid-intake sandbox
 
@@ -55,4 +63,4 @@ Live Stripe checkout, real charging, refunds, outbound customer contact, publish
 
 ## Acceptance gate
 
-This candidate is reviewable when repository CI passes on the exact branch head. It is not eligible for live economic authority without a separately reviewed change and evidence that sandbox receipt, Human STOP, rollback, authorization and replay protections are reliable.
+This candidate is reviewable when repository CI passes on the exact branch head. It is not eligible for merge or live economic authority while actor authentication, bounded payload admission, and replay-safe continuation after a partially recorded sandbox payment remain unresolved. Any later live integration requires a separately reviewed change and evidence that sandbox receipt, Human STOP, rollback, authorization and replay protections are reliable.
