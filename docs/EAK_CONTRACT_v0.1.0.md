@@ -19,6 +19,8 @@ Status: canonical candidate. This change does not supersede `victor_runtime.Vict
 13. `CLOSED`, `ABORTED`, and `QUARANTINED` tasks are terminal and immutable. Each task may receive at most one verification receipt.
 14. Capability executor and verifier callables cannot be rebound in-process under an existing capability id; a new implementation requires a new capability version.
 15. Task-state changes and their provenance events commit in the same SQLite transaction.
+16. B Heard sandbox ingress is bounded before expensive decode/parse work: webhook bodies are capped at 64 KiB, signature headers at 4096 characters, intake text fields have explicit maximum lengths, webhook identifiers are bounded, and the internally generated payment task payload is capped at 4096 serialized bytes.
+17. A verified payment and its continuation task are durably linked. An identical retry resumes the same continuation rather than silently returning before a fulfillment task exists or creating duplicate payment/task chains.
 
 ## Authority classes
 
@@ -49,18 +51,28 @@ This repository also does not authenticate the BANDO/TORI actor string accepted 
 
 `bheard.paid_intake.sandbox` is intentionally A2, not A4. It does not charge a card or send a customer message. It consumes a Stripe-compatible test-mode webhook payload as evidence and verifies:
 
+- bounded webhook and signature sizes before decode/parse;
 - HMAC signature and timestamp tolerance;
 - event type `checkout.session.completed`;
 - `livemode == false`;
 - `payment_status == paid`;
 - pinned price `$19.00` and currency `usd`;
+- bounded event/intake identifiers and intake fields;
 - intake existence;
 - immutable event-id/payload replay identity.
 
-A verified sandbox event creates an immutable payment receipt, triggers a fulfillment-draft task, writes a local draft, requires BANDO/TORI approval, and only then permits a sandbox delivery receipt. The delivery step explicitly performs no external send.
+A verified sandbox event creates an immutable payment receipt and, in the same SQLite write transaction, ensures a single durable continuation task plus its provenance event. `bheard_payment_continuations` links the Stripe-compatible event id, immutable payment receipt, and EAK task. If the process stops after that commit but before scoring or execution, an identical retry resumes the same `TRIGGERED`/`SCORED` task. A retry of a `CLOSED`, `ABORTED`, or `QUARANTINED` task reports that terminal state without creating duplicates. A task found in `EXECUTING` or `VERIFYING` is reported as `RECOVERY_REQUIRED` rather than blindly replaying an arbitrary executor.
+
+The fulfillment task writes a local draft, requires BANDO/TORI approval, and only then permits a sandbox delivery receipt. The delivery step explicitly performs no external send.
 
 Live Stripe checkout, real charging, refunds, outbound customer contact, publishing, spending, autonomous price changes, and A4 authority are outside v0.1.
 
+## Remaining boundaries
+
+The B Heard sandbox ingress and its generated payment-task payload are now explicitly bounded. The generic `EmpireAutonomyKernel.trigger()` API can still be called by other future organs with caller-supplied Python dictionaries and does not yet enforce a repository-wide structural/serialized payload budget. That broader EAK admission limit remains a promotion blocker for arbitrary new organs; this patch does not claim otherwise.
+
+Actor-label authentication also remains unresolved and requires an explicitly approved authority-verification contract rather than silently treating caller-supplied strings as identity proof.
+
 ## Acceptance gate
 
-This candidate is reviewable when repository CI passes on the exact branch head. It is not eligible for merge or live economic authority while actor authentication, bounded payload admission, and replay-safe continuation after a partially recorded sandbox payment remain unresolved. Any later live integration requires a separately reviewed change and evidence that sandbox receipt, Human STOP, rollback, authorization and replay protections are reliable.
+This candidate is reviewable when repository CI passes on the exact branch head. It is not eligible for merge or live economic authority while actor authentication and repository-wide generic EAK payload admission remain unresolved. Any later live integration requires a separately reviewed change and evidence that sandbox receipt, Human STOP, rollback, authorization and replay protections are reliable.
