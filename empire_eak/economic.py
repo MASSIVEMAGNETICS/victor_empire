@@ -24,6 +24,14 @@ class BHeardPaidIntakeSandbox:
     """Receipt-only economic sandbox. Never charges, sends, refunds, publishes, or spends."""
 
     CAPABILITY = "bheard.paid_intake.sandbox"
+    MAX_WEBHOOK_BYTES = 64 * 1024
+    MAX_SIGNATURE_CHARS = 4096
+    MAX_NAME_CHARS = 200
+    MAX_EMAIL_CHARS = 320
+    MAX_PROBLEM_CHARS = 8000
+    MAX_OUTCOME_CHARS = 4000
+    MAX_ID_CHARS = 255
+    MAX_INTERNAL_TASK_BYTES = 4096
 
     def __init__(self, eak: EmpireAutonomyKernel, *, workspace: str | Path,
                  webhook_secret: str, amount_cents: int = 1900, currency: str = "usd",
@@ -60,6 +68,11 @@ class BHeardPaidIntakeSandbox:
               id TEXT PRIMARY KEY,intake_id TEXT NOT NULL,event_id TEXT NOT NULL UNIQUE,
               amount_cents INTEGER NOT NULL,currency TEXT NOT NULL,payload_sha256 TEXT NOT NULL,
               verified_at TEXT NOT NULL,FOREIGN KEY(intake_id) REFERENCES bheard_intakes(id));
+            CREATE TABLE IF NOT EXISTS bheard_payment_continuations(
+              event_id TEXT PRIMARY KEY,payment_id TEXT NOT NULL UNIQUE,task_id TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(payment_id) REFERENCES bheard_payments(id),
+              FOREIGN KEY(task_id) REFERENCES eak_tasks(id));
             CREATE TABLE IF NOT EXISTS bheard_fulfillments(
               id TEXT PRIMARY KEY,intake_id TEXT NOT NULL UNIQUE,task_id TEXT NOT NULL,
               draft_path TEXT NOT NULL,draft_sha256 TEXT NOT NULL,state TEXT NOT NULL,
@@ -71,10 +84,21 @@ class BHeardPaidIntakeSandbox:
               BEGIN SELECT RAISE(ABORT,'payment receipts immutable'); END;
             """)
 
+    @staticmethod
+    def _require_text(name: str, value: str, maximum: int) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be text")
+        if len(value) > maximum:
+            raise ValueError(f"{name} exceeds {maximum} characters")
+        return value.strip()
+
     def submit(self, *, name: str, email: str, problem: str, desired_outcome: str,
                consent: bool) -> str:
-        name, email, problem, desired_outcome = (
-            name.strip(), email.strip(), problem.strip(), desired_outcome.strip()
+        name = self._require_text("name", name, self.MAX_NAME_CHARS)
+        email = self._require_text("email", email, self.MAX_EMAIL_CHARS)
+        problem = self._require_text("problem", problem, self.MAX_PROBLEM_CHARS)
+        desired_outcome = self._require_text(
+            "desired_outcome", desired_outcome, self.MAX_OUTCOME_CHARS
         )
         if not all((name, email, problem, desired_outcome)) or not _EMAIL.match(email):
             raise ValueError("valid intake fields required")
@@ -99,6 +123,8 @@ class BHeardPaidIntakeSandbox:
         return f"t={timestamp},v1={hmac.new(secret.encode(),signed,hashlib.sha256).hexdigest()}"
 
     def _check_signature(self, payload: bytes, header: str, now: int) -> None:
+        if not isinstance(header, str) or len(header) > self.MAX_SIGNATURE_CHARS:
+            raise PaymentError("invalid signature header")
         fields: dict[str,list[str]] = {}
         for part in header.split(","):
             if "=" in part:
@@ -116,54 +142,183 @@ class BHeardPaidIntakeSandbox:
         if not any(hmac.compare_digest(expected,x) for x in fields.get("v1",[])):
             raise PaymentError("bad webhook signature")
 
+    def _validate_webhook_bytes(self, payload: bytes) -> None:
+        if not isinstance(payload, bytes):
+            raise PaymentError("webhook payload must be bytes")
+        if len(payload) > self.MAX_WEBHOOK_BYTES:
+            raise PaymentError("webhook payload too large")
+
+    def _find_existing_task_in_transaction(self, c: Any, payment_id: str) -> str | None:
+        fulfillment = c.execute(
+            "SELECT task_id FROM bheard_fulfillments WHERE intake_id=(SELECT intake_id FROM bheard_payments WHERE id=?)",
+            (payment_id,),
+        ).fetchone()
+        if fulfillment:
+            return str(fulfillment["task_id"])
+        rows = c.execute(
+            "SELECT id,payload_json FROM eak_tasks WHERE capability_id=? AND trigger='payment_webhook'",
+            (self.CAPABILITY,),
+        ).fetchall()
+        for row in rows:
+            try:
+                task_payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(task_payload, dict) and task_payload.get("payment_receipt_id") == payment_id:
+                return str(row["id"])
+        return None
+
+    def _create_task_in_transaction(self, c: Any, *, intake_id: str, payment_id: str) -> str:
+        cap = c.execute(
+            "SELECT active,triggers_json FROM eak_capabilities WHERE id=?", (self.CAPABILITY,)
+        ).fetchone()
+        if not cap or not cap["active"]:
+            raise PaymentError("sandbox capability unavailable")
+        try:
+            triggers = json.loads(cap["triggers_json"])
+        except json.JSONDecodeError as exc:
+            raise PaymentError("sandbox capability trigger contract invalid") from exc
+        if "payment_webhook" not in triggers:
+            raise PaymentError("sandbox payment trigger unavailable")
+
+        task_id = f"eak-{uuid.uuid4().hex}"
+        task_payload = {"intake_id": intake_id, "payment_receipt_id": payment_id}
+        payload_json = json.dumps(task_payload, sort_keys=True, separators=(",", ":"))
+        if len(payload_json.encode("utf-8")) > self.MAX_INTERNAL_TASK_BYTES:
+            raise PaymentError("internal sandbox task payload too large")
+        now = utc_now()
+        c.execute(
+            "INSERT INTO eak_tasks VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (task_id, self.CAPABILITY, "payment_webhook", payload_json,
+             "TRIGGERED", None, None, None, now, now),
+        )
+        self.events.append_in_transaction(
+            c,
+            actor="eak",
+            action="TASK_TRIGGERED",
+            entity_id=task_id,
+            payload={"capability": self.CAPABILITY, "trigger": "payment_webhook"},
+        )
+        return task_id
+
+    def _ensure_continuation_in_transaction(
+        self, c: Any, *, event_id: str, intake_id: str, payment_id: str
+    ) -> str:
+        existing = c.execute(
+            "SELECT task_id FROM bheard_payment_continuations WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if existing:
+            return str(existing["task_id"])
+        task_id = self._find_existing_task_in_transaction(c, payment_id)
+        if task_id is None:
+            task_id = self._create_task_in_transaction(
+                c, intake_id=intake_id, payment_id=payment_id
+            )
+        c.execute(
+            "INSERT INTO bheard_payment_continuations VALUES(?,?,?,?)",
+            (event_id, payment_id, task_id, utc_now()),
+        )
+        return task_id
+
+    def _resume_payment_task(self, task_id: str) -> dict[str, Any]:
+        for _ in range(4):
+            task = self.eak._task(task_id)
+            state = str(task["state"])
+            if state == "TRIGGERED":
+                try:
+                    self.eak.score(
+                        task_id, expected_value=1, information_gain=.8, strategic_alignment=1,
+                        cost=.05, risk=.05, uncertainty=.05, authority_friction=0,
+                    )
+                except EAKError:
+                    continue
+                continue
+            if state == "SCORED":
+                try:
+                    result = self.eak.run(task_id)
+                    return {"task_id": task_id, "state": result["state"]}
+                except EAKError:
+                    refreshed = self.eak._task(task_id)
+                    if refreshed["state"] in {"CLOSED", "ABORTED", "QUARANTINED"}:
+                        return {"task_id": task_id, "state": refreshed["state"]}
+                    raise
+            if state in {"CLOSED", "ABORTED", "QUARANTINED"}:
+                return {"task_id": task_id, "state": state}
+            if state in {"EXECUTING", "VERIFYING"}:
+                return {
+                    "task_id": task_id,
+                    "state": "RECOVERY_REQUIRED",
+                    "task_state": state,
+                }
+            raise PaymentError(f"unknown continuation task state: {state}")
+        raise PaymentError("sandbox continuation did not converge")
+
     def accept_payment(self, payload: bytes, signature: str, *, now: int | None = None) -> dict[str,Any]:
+        self._validate_webhook_bytes(payload)
         now = int(time.time()) if now is None else int(now)
         self._check_signature(payload, signature, now)
         try:
-            event = json.loads(payload.decode())
+            event = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError,json.JSONDecodeError) as exc:
             raise PaymentError("invalid JSON") from exc
+        if not isinstance(event, dict):
+            raise PaymentError("webhook event must be a JSON object")
         if event.get("type") != "checkout.session.completed" or event.get("livemode") is not False:
             raise PaymentError("sandbox accepts test checkout.session.completed only")
         obj = ((event.get("data") or {}).get("object") or {})
-        intake_id = str((obj.get("metadata") or {}).get("intake_id") or "")
+        if not isinstance(obj, dict):
+            raise PaymentError("invalid checkout session object")
+        metadata = obj.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            raise PaymentError("invalid checkout metadata")
+        intake_id = str(metadata.get("intake_id") or "")
         event_id = str(event.get("id") or "")
+        if len(intake_id) > self.MAX_ID_CHARS or len(event_id) > self.MAX_ID_CHARS:
+            raise PaymentError("webhook identifiers too large")
         if not intake_id or not event_id or obj.get("payment_status") != "paid":
             raise PaymentError("incomplete paid session")
         if obj.get("amount_total") != self.amount or str(obj.get("currency") or "").lower() != self.currency:
             raise PaymentError("payment does not match pinned offer")
         digest = hashlib.sha256(payload).hexdigest()
+
         with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
             if not c.execute("SELECT 1 FROM bheard_intakes WHERE id=?", (intake_id,)).fetchone():
                 raise PaymentError("unknown intake")
             old = c.execute("SELECT * FROM bheard_payments WHERE event_id=?", (event_id,)).fetchone()
             if old:
                 if old["payload_sha256"] != digest:
                     raise PaymentError("event replay payload changed")
-                return {"payment_receipt_id": old["id"], "task_id": None, "state": "IDEMPOTENT"}
-            pay_id = f"pay-{uuid.uuid4().hex}"
-            c.execute(
-                "INSERT INTO bheard_payments VALUES(?,?,?,?,?,?,?)",
-                (pay_id,intake_id,event_id,self.amount,self.currency,digest,utc_now()),
+                payment_id = str(old["id"])
+            else:
+                payment_id = f"pay-{uuid.uuid4().hex}"
+                c.execute(
+                    "INSERT INTO bheard_payments VALUES(?,?,?,?,?,?,?)",
+                    (payment_id,intake_id,event_id,self.amount,self.currency,digest,utc_now()),
+                )
+                c.execute(
+                    "UPDATE bheard_intakes SET state='PAYMENT_VERIFIED',updated_at=? WHERE id=?",
+                    (utc_now(),intake_id),
+                )
+
+            if not c.execute(
+                "SELECT 1 FROM events WHERE action='PAYMENT_VERIFIED_SANDBOX' AND entity_id=? LIMIT 1",
+                (payment_id,),
+            ).fetchone():
+                self.events.append_in_transaction(
+                    c,
+                    actor="bheard-sandbox",
+                    action="PAYMENT_VERIFIED_SANDBOX",
+                    entity_id=payment_id,
+                    payload={"intake_id": intake_id,"amount_cents":self.amount,"currency":self.currency},
+                )
+
+            task_id = self._ensure_continuation_in_transaction(
+                c, event_id=event_id, intake_id=intake_id, payment_id=payment_id
             )
-            c.execute(
-                "UPDATE bheard_intakes SET state='PAYMENT_VERIFIED',updated_at=? WHERE id=?",
-                (utc_now(),intake_id),
-            )
-        self.events.append(
-            actor="bheard-sandbox", action="PAYMENT_VERIFIED_SANDBOX", entity_id=pay_id,
-            payload={"intake_id": intake_id,"amount_cents":self.amount,"currency":self.currency},
-        )
-        task = self.eak.trigger(
-            self.CAPABILITY,"payment_webhook",
-            {"intake_id":intake_id,"payment_receipt_id":pay_id},
-        )
-        self.eak.score(
-            task, expected_value=1, information_gain=.8, strategic_alignment=1,
-            cost=.05, risk=.05, uncertainty=.05, authority_friction=0,
-        )
-        result = self.eak.run(task)
-        return {"payment_receipt_id":pay_id,"task_id":task,"state":result["state"]}
+
+        continuation = self._resume_payment_task(task_id)
+        return {"payment_receipt_id": payment_id, **continuation}
 
     def _draft(self, payload: dict[str,Any]) -> dict[str,Any]:
         intake_id = payload["intake_id"]
