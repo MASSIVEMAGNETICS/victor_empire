@@ -92,6 +92,25 @@ class BHeardSandboxHardeningTests(unittest.TestCase):
             count = c.execute("SELECT COUNT(*) n FROM bheard_intakes").fetchone()["n"]
         self.assertEqual(count, 0)
 
+    def test_intake_event_failure_rolls_back_state(self):
+        root, victor, eak, organ = self.env()
+        original_append = organ.events.append_in_transaction
+
+        def fail_intake_event(conn, **kwargs):
+            if kwargs.get("action") == "INTAKE_COMPLETED":
+                raise RuntimeError("injected intake event failure")
+            return original_append(conn, **kwargs)
+
+        organ.events.append_in_transaction = fail_intake_event
+        with self.assertRaisesRegex(RuntimeError, "injected intake event failure"):
+            self.intake(organ)
+        with victor.db.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) n FROM bheard_intakes").fetchone()["n"], 0)
+            self.assertEqual(
+                c.execute("SELECT COUNT(*) n FROM events WHERE action='INTAKE_COMPLETED'").fetchone()["n"],
+                0,
+            )
+
     def test_retry_resumes_same_task_after_post_commit_interruption(self):
         root, victor, eak, organ = self.env()
         intake = self.intake(organ)

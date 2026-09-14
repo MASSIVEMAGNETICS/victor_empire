@@ -125,14 +125,18 @@ class BHeardPaidIntakeSandbox:
         intake_id = f"intake-{uuid.uuid4().hex}"
         now = utc_now()
         with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
             c.execute(
                 "INSERT INTO bheard_intakes VALUES(?,?,?,?,?,?,?,?,?)",
                 (intake_id,name,email,problem,desired_outcome,1,"INTAKE_COMPLETED",now,now),
             )
-        self.events.append(
-            actor="bheard-sandbox", action="INTAKE_COMPLETED", entity_id=intake_id,
-            payload={"problem": problem},
-        )
+            self.events.append_in_transaction(
+                c,
+                actor="bheard-sandbox",
+                action="INTAKE_COMPLETED",
+                entity_id=intake_id,
+                payload={"problem": problem},
+            )
         return intake_id
 
     @staticmethod
@@ -389,6 +393,7 @@ class BHeardPaidIntakeSandbox:
         digest = hashlib.sha256(content).hexdigest()
         now = utc_now()
         with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
             c.execute(
                 "INSERT INTO bheard_fulfillments VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (f"ful-{uuid.uuid4().hex}",intake_id,payload["_task_id"],str(target),
@@ -397,6 +402,13 @@ class BHeardPaidIntakeSandbox:
             c.execute(
                 "UPDATE bheard_intakes SET state='FULFILLMENT_DRAFTED',updated_at=? WHERE id=?",
                 (now,intake_id),
+            )
+            self.events.append_in_transaction(
+                c,
+                actor="bheard-sandbox",
+                action="FULFILLMENT_DRAFTED",
+                entity_id=intake_id,
+                payload={"draft_sha256": digest, "task_id": payload["_task_id"]},
             )
         return {
             "draft_path":str(target),"draft_sha256":digest,"intake_id":intake_id,
@@ -446,6 +458,7 @@ class BHeardPaidIntakeSandbox:
         if actor not in {"BANDO","TORI"}:
             raise EAKError("approval requires BANDO or TORI")
         with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
             row = c.execute("SELECT state FROM bheard_fulfillments WHERE intake_id=?", (intake_id,)).fetchone()
             if not row or row["state"] != "HUMAN_APPROVAL_PENDING":
                 raise EAKError("not awaiting approval")
@@ -453,12 +466,17 @@ class BHeardPaidIntakeSandbox:
                 "UPDATE bheard_fulfillments SET state='HUMAN_APPROVED_SANDBOX',approved_by=?,updated_at=? WHERE intake_id=?",
                 (actor,utc_now(),intake_id),
             )
-        self.events.append(
-            actor=actor.lower(),action="BHEARD_SANDBOX_APPROVED",entity_id=intake_id,payload={}
-        )
+            self.events.append_in_transaction(
+                c,
+                actor=actor.lower(),
+                action="BHEARD_SANDBOX_APPROVED",
+                entity_id=intake_id,
+                payload={},
+            )
 
     def deliver(self, intake_id: str) -> None:
         with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
             row = c.execute("SELECT state FROM bheard_fulfillments WHERE intake_id=?", (intake_id,)).fetchone()
             if not row or row["state"] != "HUMAN_APPROVED_SANDBOX":
                 raise EAKError("delivery receipt requires approval")
@@ -466,15 +484,19 @@ class BHeardPaidIntakeSandbox:
                 "UPDATE bheard_fulfillments SET state='DELIVERED_SANDBOX',delivered_at=?,updated_at=? WHERE intake_id=?",
                 (utc_now(),utc_now(),intake_id),
             )
-        self.events.append(
-            actor="bheard-sandbox",action="DELIVERY_RECORDED_SANDBOX",entity_id=intake_id,
-            payload={"external_send_performed":False},
-        )
+            self.events.append_in_transaction(
+                c,
+                actor="bheard-sandbox",
+                action="DELIVERY_RECORDED_SANDBOX",
+                entity_id=intake_id,
+                payload={"external_send_performed":False},
+            )
 
     def record_outcome(self, intake_id: str, outcome: str) -> None:
         if outcome not in {"opened","replied","requested_refund","upgraded","no_response"}:
             raise ValueError("invalid outcome")
         with self.db.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
             row = c.execute("SELECT state FROM bheard_fulfillments WHERE intake_id=?", (intake_id,)).fetchone()
             if not row or row["state"] != "DELIVERED_SANDBOX":
                 raise EAKError("outcome requires delivery receipt")
@@ -482,7 +504,10 @@ class BHeardPaidIntakeSandbox:
                 "UPDATE bheard_fulfillments SET outcome=?,updated_at=? WHERE intake_id=?",
                 (outcome,utc_now(),intake_id),
             )
-        self.events.append(
-            actor="bheard-sandbox",action="OUTCOME_RECORDED_SANDBOX",entity_id=intake_id,
-            payload={"outcome":outcome},
-        )
+            self.events.append_in_transaction(
+                c,
+                actor="bheard-sandbox",
+                action="OUTCOME_RECORDED_SANDBOX",
+                entity_id=intake_id,
+                payload={"outcome":outcome},
+            )

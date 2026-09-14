@@ -23,6 +23,7 @@ Status: canonical candidate. This change does not supersede `victor_runtime.Vict
 17. A verified payment and its continuation task are durably linked. An identical retry resumes the same continuation rather than silently returning before a fulfillment task exists or creating duplicate payment/task chains.
 18. Generic task admission accepts only bounded JSON objects: at most 64 KiB canonical UTF-8, 2,048 structural nodes, and 16 nesting levels. Admission validation completes before a SQLite write transaction begins, and stored task payloads are revalidated before use.
 19. B Heard sandbox drafts are created and verified relative to a held workspace directory descriptor. Final-entry symlinks and pre-existing paths fail closed; draft content is byte-bounded and hashed from the bytes actually written.
+20. B Heard intake, draft, approval, sandbox-delivery, and outcome state transitions commit atomically with their provenance events; an event append failure rolls back the associated database state.
 
 ## Authority classes
 
