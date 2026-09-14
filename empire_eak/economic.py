@@ -35,7 +35,7 @@ class BHeardPaidIntakeSandbox:
     MAX_OUTCOME_CHARS = 4000
     MAX_ID_CHARS = 255
     MAX_INTERNAL_TASK_BYTES = 4096
-    MAX_DRAFT_BYTES = 16 * 1024
+    MAX_DRAFT_BYTES = 64 * 1024
 
     def __init__(self, eak: EmpireAutonomyKernel, *, workspace: str | Path,
                  webhook_secret: str, amount_cents: int = 1900, currency: str = "usd",
@@ -47,8 +47,11 @@ class BHeardPaidIntakeSandbox:
         self.events = eak.events
         self.root = Path(workspace).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        required = (os.open, os.stat, os.unlink)
-        if not all(operation in os.supports_dir_fd for operation in required):
+        if (
+            os.open not in os.supports_dir_fd
+            or not getattr(os, "O_DIRECTORY", 0)
+            or not getattr(os, "O_NOFOLLOW", 0)
+        ):
             raise EAKError("descriptor-bound sandbox workspace is unavailable")
         workspace_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         workspace_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -273,20 +276,29 @@ class BHeardPaidIntakeSandbox:
         self._check_signature(payload, signature, now)
         try:
             event = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError,json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise PaymentError("invalid JSON") from exc
         if not isinstance(event, dict):
             raise PaymentError("webhook event must be a JSON object")
+        try:
+            self.eak._validate_task_payload(event)
+        except EAKError as exc:
+            raise PaymentError("webhook JSON structure exceeds limits") from exc
         if event.get("type") != "checkout.session.completed" or event.get("livemode") is not False:
             raise PaymentError("sandbox accepts test checkout.session.completed only")
-        obj = ((event.get("data") or {}).get("object") or {})
+        data = event.get("data") or {}
+        if not isinstance(data, dict):
+            raise PaymentError("invalid checkout session data")
+        obj = data.get("object") or {}
         if not isinstance(obj, dict):
             raise PaymentError("invalid checkout session object")
         metadata = obj.get("metadata") or {}
         if not isinstance(metadata, dict):
             raise PaymentError("invalid checkout metadata")
-        intake_id = str(metadata.get("intake_id") or "")
-        event_id = str(event.get("id") or "")
+        intake_id = metadata.get("intake_id") or ""
+        event_id = event.get("id") or ""
+        if not isinstance(intake_id, str) or not isinstance(event_id, str):
+            raise PaymentError("webhook identifiers must be text")
         if len(intake_id) > self.MAX_ID_CHARS or len(event_id) > self.MAX_ID_CHARS:
             raise PaymentError("webhook identifiers too large")
         if not intake_id or not event_id or obj.get("payment_status") != "paid":

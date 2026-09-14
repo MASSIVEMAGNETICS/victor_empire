@@ -57,6 +57,27 @@ class BHeardSandboxHardeningTests(unittest.TestCase):
         with self.assertRaisesRegex(PaymentError, "payload too large"):
             organ.accept_payment(payload, "not-a-valid-signature", now=int(time.time()))
 
+    def test_deep_webhook_json_is_rejected_before_persistence(self):
+        root, victor, eak, organ = self.env()
+        intake = self.intake(organ)
+        event = {
+            "id": "evt-deep",
+            "type": "checkout.session.completed",
+            "livemode": False,
+            "data": {"object": {"metadata": {"intake_id": intake}}},
+        }
+        cursor = event
+        for _ in range(eak.MAX_TASK_PAYLOAD_DEPTH):
+            child = {}
+            cursor["extra"] = child
+            cursor = child
+        payload = json.dumps(event, separators=(",", ":")).encode()
+        ts = int(time.time())
+        with self.assertRaisesRegex(PaymentError, "structure exceeds limits"):
+            organ.accept_payment(payload, organ.sign(payload, "secret", ts), now=ts)
+        with victor.db.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) n FROM bheard_payments").fetchone()["n"], 0)
+
     def test_oversized_intake_field_rejected_before_persistence(self):
         root, victor, eak, organ = self.env()
         with self.assertRaisesRegex(ValueError, "problem exceeds"):
