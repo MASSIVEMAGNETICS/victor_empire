@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from victor_runtime import VictorKernel
 from empire_eak import BHeardPaidIntakeSandbox, EmpireAutonomyKernel, PaymentError
@@ -127,6 +129,59 @@ class BHeardSandboxHardeningTests(unittest.TestCase):
         with victor.db.connect() as c:
             self.assertEqual(c.execute("SELECT COUNT(*) n FROM bheard_payments").fetchone()["n"], 1)
             self.assertEqual(c.execute("SELECT COUNT(*) n FROM bheard_fulfillments").fetchone()["n"], 1)
+
+    def test_draft_creation_rejects_final_entry_symlink_swap(self):
+        root, victor, eak, organ = self.env()
+        intake = self.intake(organ)
+        payload, signature, ts = self.paid_fixture(organ, intake, event_id="evt_symlink")
+        outside = root / "outside.md"
+        outside.write_text("SAFE", encoding="utf-8")
+        draft_name = f"{intake}.md"
+        original_open = os.open
+        swapped = False
+
+        def race_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if path == draft_name and flags & os.O_WRONLY and not swapped:
+                swapped = True
+                (root / "bheard" / draft_name).symlink_to(outside)
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch("empire_eak.economic.os.open", side_effect=race_open):
+            outcome = organ.accept_payment(payload, signature, now=ts)
+        self.assertTrue(swapped)
+        self.assertEqual(outcome["state"], "QUARANTINED")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "SAFE")
+
+    def test_legacy_continuation_lookup_is_exact_and_does_not_parse_history(self):
+        root, victor, eak, organ = self.env()
+        intake = self.intake(organ)
+        payment_id = "pay-legacy"
+        now = "2026-09-14T00:00:00+00:00"
+        task_payload = {"intake_id": intake, "payment_receipt_id": payment_id}
+        expected_task = "eak-legacy"
+        with victor.db.connect() as c:
+            c.execute(
+                "INSERT INTO bheard_payments VALUES(?,?,?,?,?,?,?)",
+                (payment_id, intake, "evt-legacy", 1900, "usd", "a" * 64, now),
+            )
+            c.execute(
+                "INSERT INTO eak_tasks VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (expected_task, organ.CAPABILITY, "payment_webhook",
+                 json.dumps(task_payload, sort_keys=True), "TRIGGERED",
+                 None, None, None, now, now),
+            )
+            for index in range(100):
+                c.execute(
+                    "INSERT INTO eak_tasks VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (f"eak-noise-{index}", organ.CAPABILITY, "payment_webhook",
+                     "not-json", "TRIGGERED", None, None, None, now, now),
+                )
+        with mock.patch("empire_eak.economic.json.loads", side_effect=AssertionError("parsed history")):
+            with victor.db.connect() as c:
+                self.assertEqual(
+                    organ._find_existing_task_in_transaction(c, payment_id), expected_task
+                )
 
 
 if __name__ == "__main__":

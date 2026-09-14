@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
+import stat
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,7 @@ class BHeardPaidIntakeSandbox:
     MAX_OUTCOME_CHARS = 4000
     MAX_ID_CHARS = 255
     MAX_INTERNAL_TASK_BYTES = 4096
+    MAX_DRAFT_BYTES = 16 * 1024
 
     def __init__(self, eak: EmpireAutonomyKernel, *, workspace: str | Path,
                  webhook_secret: str, amount_cents: int = 1900, currency: str = "usd",
@@ -43,6 +47,13 @@ class BHeardPaidIntakeSandbox:
         self.events = eak.events
         self.root = Path(workspace).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        required = (os.open, os.stat, os.unlink)
+        if not all(operation in os.supports_dir_fd for operation in required):
+            raise EAKError("descriptor-bound sandbox workspace is unavailable")
+        workspace_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        workspace_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        self._root_fd = os.open(self.root, workspace_flags)
+        self._close_root = weakref.finalize(self, os.close, self._root_fd)
         self.secret = webhook_secret.encode()
         self.amount = amount_cents
         self.currency = currency.lower()
@@ -82,6 +93,10 @@ class BHeardPaidIntakeSandbox:
               BEGIN SELECT RAISE(ABORT,'payment receipts immutable'); END;
             CREATE TRIGGER IF NOT EXISTS bheard_payments_no_delete BEFORE DELETE ON bheard_payments
               BEGIN SELECT RAISE(ABORT,'payment receipts immutable'); END;
+            CREATE INDEX IF NOT EXISTS bheard_task_payload_lookup
+              ON eak_tasks(capability_id,trigger,payload_json)
+              WHERE capability_id='bheard.paid_intake.sandbox'
+                AND trigger='payment_webhook';
             """)
 
     @staticmethod
@@ -155,18 +170,17 @@ class BHeardPaidIntakeSandbox:
         ).fetchone()
         if fulfillment:
             return str(fulfillment["task_id"])
-        rows = c.execute(
-            "SELECT id,payload_json FROM eak_tasks WHERE capability_id=? AND trigger='payment_webhook'",
-            (self.CAPABILITY,),
-        ).fetchall()
-        for row in rows:
-            try:
-                task_payload = json.loads(row["payload_json"])
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if isinstance(task_payload, dict) and task_payload.get("payment_receipt_id") == payment_id:
-                return str(row["id"])
-        return None
+        task_payload = {"intake_id": str(c.execute(
+            "SELECT intake_id FROM bheard_payments WHERE id=?", (payment_id,)
+        ).fetchone()["intake_id"]), "payment_receipt_id": payment_id}
+        canonical = json.dumps(task_payload, sort_keys=True, separators=(",", ":"))
+        legacy = json.dumps(task_payload, sort_keys=True)
+        row = c.execute(
+            "SELECT id FROM eak_tasks WHERE capability_id=? AND trigger='payment_webhook' "
+            "AND payload_json IN (?,?) ORDER BY created_at,id LIMIT 1",
+            (self.CAPABILITY, canonical, legacy),
+        ).fetchone()
+        return str(row["id"]) if row else None
 
     def _create_task_in_transaction(self, c: Any, *, intake_id: str, payment_id: str) -> str:
         cap = c.execute(
@@ -330,17 +344,37 @@ class BHeardPaidIntakeSandbox:
             ).fetchone()
         if not intake or not payment or intake["state"] != "PAYMENT_VERIFIED":
             raise EAKError("verified payment required before fulfillment")
-        target = (self.root/f"{intake_id}.md").resolve()
-        if target.parent != self.root:
-            raise EAKError("draft path escaped workspace")
-        target.write_text(
+        if not re.fullmatch(r"intake-[0-9a-f]{32}", intake_id):
+            raise EAKError("invalid sandbox intake identifier")
+        draft_name = f"{intake_id}.md"
+        target = self.root / draft_name
+        content = (
             "# B Heard Signal Intake - SANDBOX DRAFT\n\n"
             f"Intake: {intake_id}\nProblem: {intake['problem']}\n"
             f"Desired outcome: {intake['outcome']}\n\n"
-            "No external delivery occurred. Human approval is required.\n",
-            encoding="utf-8",
-        )
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            "No external delivery occurred. Human approval is required.\n"
+        ).encode("utf-8")
+        if len(content) > self.MAX_DRAFT_BYTES:
+            raise EAKError("sandbox draft exceeds byte limit")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(draft_name, flags, 0o600, dir_fd=self._root_fd)
+            try:
+                view = memoryview(content)
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise OSError("short sandbox draft write")
+                    view = view[written:]
+                draft_stat = os.fstat(fd)
+                if not stat.S_ISREG(draft_stat.st_mode) or draft_stat.st_size != len(content):
+                    raise EAKError("sandbox draft is not a bounded regular file")
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise EAKError("sandbox draft creation failed closed") from exc
+        digest = hashlib.sha256(content).hexdigest()
         now = utc_now()
         with self.db.connect() as c:
             c.execute(
@@ -359,12 +393,40 @@ class BHeardPaidIntakeSandbox:
         }
 
     def _verify_draft(self, payload: dict[str,Any], result: dict[str,Any]) -> bool:
-        p = Path(result.get("draft_path","")).resolve()
+        intake_id = payload.get("intake_id")
+        if not isinstance(intake_id, str) or not re.fullmatch(r"intake-[0-9a-f]{32}", intake_id):
+            return False
+        draft_name = f"{intake_id}.md"
+        if result.get("draft_path") != str(self.root / draft_name):
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(draft_name, flags, dir_fd=self._root_fd)
+            try:
+                draft_stat = os.fstat(fd)
+                if not stat.S_ISREG(draft_stat.st_mode) or draft_stat.st_size > self.MAX_DRAFT_BYTES:
+                    return False
+                chunks: list[bytes] = []
+                remaining = self.MAX_DRAFT_BYTES + 1
+                while remaining:
+                    chunk = os.read(fd, min(8192, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                content = b"".join(chunks)
+                if len(content) > self.MAX_DRAFT_BYTES:
+                    return False
+            finally:
+                os.close(fd)
+        except OSError:
+            return False
         return (
-            p.parent == self.root and p.is_file() and result.get("sandbox") is True
+            result.get("sandbox") is True
             and result.get("human_approval_required") is True
-            and result.get("intake_id") == payload.get("intake_id")
-            and hashlib.sha256(p.read_bytes()).hexdigest() == result.get("draft_sha256")
+            and result.get("intake_id") == intake_id
+            and hashlib.sha256(content).hexdigest() == result.get("draft_sha256")
         )
 
     def approve(self, intake_id: str, *, actor: str) -> None:

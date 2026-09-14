@@ -95,6 +95,27 @@ class EAKTests(unittest.TestCase):
         self.assertEqual(calls,[])
         self.assertEqual(eak.status()["recent_tasks"][0]["state"],"SCORED")
 
+    def test_trigger_rejects_oversized_payload_before_database_write(self):
+        root,v,eak=self.env(); self.safe(eak)
+        payload={"blob":"x"*(eak.MAX_TASK_PAYLOAD_BYTES+1)}
+        with self.assertRaisesRegex(EAKError,"payload text exceeds byte limit"):
+            eak.trigger("test.safe","manual",payload)
+        with v.db.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) n FROM eak_tasks").fetchone()["n"],0)
+
+    def test_trigger_rejects_deep_or_cyclic_payload_before_database_write(self):
+        root,v,eak=self.env(); self.safe(eak)
+        deep={}; cursor=deep
+        for _ in range(eak.MAX_TASK_PAYLOAD_DEPTH):
+            child={}; cursor["next"]=child; cursor=child
+        with self.assertRaisesRegex(EAKError,"nesting depth limit"):
+            eak.trigger("test.safe","manual",deep)
+        cyclic={}; cyclic["self"]=cyclic
+        with self.assertRaisesRegex(EAKError,"shared or cyclic"):
+            eak.trigger("test.safe","manual",cyclic)
+        with v.db.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) n FROM eak_tasks").fetchone()["n"],0)
+
     def test_stop_transaction_that_wins_before_admission_blocks_executor(self):
         root,v,eak=self.env(); calls=[]; outcome=[]
         eak.register(
