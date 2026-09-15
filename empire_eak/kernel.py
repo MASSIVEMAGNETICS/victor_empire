@@ -93,7 +93,7 @@ class EmpireAutonomyKernel:
             )
 
     @classmethod
-    def _validate_json_value(cls, value: Any, *, label: str) -> Any:
+    def _validate_json_value(cls, value: Any, *, label: str) -> None:
         """Validate a JSON-only value before potentially expensive serialization."""
         nodes = 0
         text_bytes = 0
@@ -147,8 +147,6 @@ class EmpireAutonomyKernel:
                 stack.extend((item, depth + 1) for item in value)
                 continue
             raise EAKError(f"{label} contains unsupported type {type(value).__name__}")
-        return value
-
     @classmethod
     def _validate_task_payload(cls, payload: Any) -> dict[str, Any]:
         """Validate a JSON-only payload without first serializing an unbounded object."""
@@ -553,19 +551,20 @@ class EmpireAutonomyKernel:
             payload["_task_id"] = task_id
             result = executor(payload)
             result_json = self._encode_executor_result(result)
+            admitted_result = json.loads(result_json)
             authority = Authority(task["authority"])
             if (
                 authority >= Authority.A2_REVERSIBLE
                 and task["rollback_required"]
-                and not result.get("rollback")
+                and not admitted_result.get("rollback")
             ):
                 raise EAKError("rollback evidence required")
 
             self._begin_verification(task_id)
-            verdict = verifier(payload, result)
+            verdict = verifier(payload, admitted_result)
             if not self._validate_verifier_result(verdict):
                 raise EAKError("verification failed")
-            if self._encode_executor_result(result) != result_json:
+            if self._encode_executor_result(admitted_result) != result_json:
                 raise EAKError("verifier mutated executor result")
 
             receipt_id = f"eakr-{uuid.uuid4().hex}"
