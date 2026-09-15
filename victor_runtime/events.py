@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -38,36 +39,62 @@ class EventLedger:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         with self.db.connect() as conn:
-            row = conn.execute("SELECT hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
-            prev_hash = row["hash"] if row else GENESIS_HASH
-            event = {
-                "event_id": f"evt-{uuid.uuid4().hex}",
-                "ts": utc_now(),
-                "actor": actor,
-                "action": action,
-                "entity_id": entity_id,
-                "payload": payload,
-                "prev_hash": prev_hash,
-            }
-            digest = event_digest(event)
-            conn.execute(
-                """
-                INSERT INTO events(event_id, ts, actor, action, entity_id, payload_json, prev_hash, hash)
-                VALUES(?,?,?,?,?,?,?,?)
-                """,
-                (
-                    event["event_id"],
-                    event["ts"],
-                    actor,
-                    action,
-                    entity_id,
-                    canonical_json(payload),
-                    prev_hash,
-                    digest,
-                ),
+            conn.execute("BEGIN IMMEDIATE")
+            return self.append_in_transaction(
+                conn,
+                actor=actor,
+                action=action,
+                entity_id=entity_id,
+                payload=payload,
             )
-            event["hash"] = digest
-            return event
+
+    def append_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        actor: str,
+        action: str,
+        entity_id: str | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Append using the caller's transaction.
+
+        The caller must already hold the write transaction when the event needs
+        to commit atomically with a state transition.  This prevents a durable
+        task/receipt mutation from being separated from its provenance event.
+        """
+        if not conn.in_transaction:
+            raise RuntimeError("append_in_transaction requires an active transaction")
+        row = conn.execute("SELECT hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
+        prev_hash = row["hash"] if row else GENESIS_HASH
+        event = {
+            "event_id": f"evt-{uuid.uuid4().hex}",
+            "ts": utc_now(),
+            "actor": actor,
+            "action": action,
+            "entity_id": entity_id,
+            "payload": payload,
+            "prev_hash": prev_hash,
+        }
+        digest = event_digest(event)
+        conn.execute(
+            """
+            INSERT INTO events(event_id, ts, actor, action, entity_id, payload_json, prev_hash, hash)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                event["event_id"],
+                event["ts"],
+                actor,
+                action,
+                entity_id,
+                canonical_json(payload),
+                prev_hash,
+                digest,
+            ),
+        )
+        event["hash"] = digest
+        return event
 
     def verify(self) -> tuple[bool, int, str | None]:
         with self.db.connect() as conn:
