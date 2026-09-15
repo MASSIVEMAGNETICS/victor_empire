@@ -93,78 +93,101 @@ class EmpireAutonomyKernel:
             )
 
     @classmethod
-    def _validate_task_payload(cls, payload: Any) -> dict[str, Any]:
-        """Validate a JSON-only payload without first serializing an unbounded object."""
-        if not isinstance(payload, dict):
-            raise EAKError("task payload must be a JSON object")
-
+    def _validate_json_value(cls, value: Any, *, label: str) -> Any:
+        """Validate a JSON-only value before potentially expensive serialization."""
         nodes = 0
         text_bytes = 0
         seen_containers: set[int] = set()
-        stack: list[tuple[Any, int]] = [(payload, 1)]
+        stack: list[tuple[Any, int]] = [(value, 1)]
         while stack:
             value, depth = stack.pop()
             nodes += 1
             if nodes > cls.MAX_TASK_PAYLOAD_NODES:
-                raise EAKError("task payload exceeds structural node limit")
+                raise EAKError(f"{label} exceeds structural node limit")
             if depth > cls.MAX_TASK_PAYLOAD_DEPTH:
-                raise EAKError("task payload exceeds nesting depth limit")
+                raise EAKError(f"{label} exceeds nesting depth limit")
 
             if value is None or isinstance(value, bool):
                 continue
             if isinstance(value, int):
                 if value.bit_length() > MAX_TASK_INTEGER_BITS:
-                    raise EAKError("task payload integer exceeds size limit")
+                    raise EAKError(f"{label} integer exceeds size limit")
                 continue
             if isinstance(value, float):
                 if not math.isfinite(value):
-                    raise EAKError("task payload numbers must be finite")
+                    raise EAKError(f"{label} numbers must be finite")
                 continue
             if isinstance(value, str):
                 if len(value) > cls.MAX_TASK_PAYLOAD_BYTES:
-                    raise EAKError("task payload text exceeds byte limit")
+                    raise EAKError(f"{label} text exceeds byte limit")
                 text_bytes += len(value.encode("utf-8"))
                 if text_bytes > cls.MAX_TASK_PAYLOAD_BYTES:
-                    raise EAKError("task payload text exceeds byte limit")
+                    raise EAKError(f"{label} text exceeds byte limit")
                 continue
             if isinstance(value, dict):
                 identity = id(value)
                 if identity in seen_containers:
-                    raise EAKError("task payload cannot contain shared or cyclic containers")
+                    raise EAKError(f"{label} cannot contain shared or cyclic containers")
                 seen_containers.add(identity)
                 if len(value) * 2 > cls.MAX_TASK_PAYLOAD_NODES - nodes:
-                    raise EAKError("task payload exceeds structural node limit")
+                    raise EAKError(f"{label} exceeds structural node limit")
                 for key, item in value.items():
                     if not isinstance(key, str):
-                        raise EAKError("task payload object keys must be strings")
+                        raise EAKError(f"{label} object keys must be strings")
                     stack.append((item, depth + 1))
                     stack.append((key, depth + 1))
                 continue
             if isinstance(value, list):
                 identity = id(value)
                 if identity in seen_containers:
-                    raise EAKError("task payload cannot contain shared or cyclic containers")
+                    raise EAKError(f"{label} cannot contain shared or cyclic containers")
                 seen_containers.add(identity)
                 if len(value) > cls.MAX_TASK_PAYLOAD_NODES - nodes:
-                    raise EAKError("task payload exceeds structural node limit")
+                    raise EAKError(f"{label} exceeds structural node limit")
                 stack.extend((item, depth + 1) for item in value)
                 continue
-            raise EAKError(f"task payload contains unsupported type {type(value).__name__}")
+            raise EAKError(f"{label} contains unsupported type {type(value).__name__}")
+        return value
+
+    @classmethod
+    def _validate_task_payload(cls, payload: Any) -> dict[str, Any]:
+        """Validate a JSON-only payload without first serializing an unbounded object."""
+        if not isinstance(payload, dict):
+            raise EAKError("task payload must be a JSON object")
+        cls._validate_json_value(payload, label="task payload")
         return payload
 
     @classmethod
-    def _encode_task_payload(cls, payload: Any) -> str:
-        validated = cls._validate_task_payload(payload)
+    def _encode_bounded_json(cls, value: Any, *, label: str) -> str:
+        cls._validate_json_value(value, label=label)
         encoded = json.dumps(
-            validated,
+            value,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
             allow_nan=False,
         )
         if len(encoded.encode("utf-8")) > cls.MAX_TASK_PAYLOAD_BYTES:
-            raise EAKError("task payload exceeds serialized byte limit")
+            raise EAKError(f"{label} exceeds serialized byte limit")
         return encoded
+
+    @classmethod
+    def _encode_task_payload(cls, payload: Any) -> str:
+        validated = cls._validate_task_payload(payload)
+        return cls._encode_bounded_json(validated, label="task payload")
+
+    @classmethod
+    def _encode_executor_result(cls, result: Any) -> str:
+        if not isinstance(result, dict):
+            raise EAKError("executor result must be a JSON object")
+        return cls._encode_bounded_json(result, label="executor result")
+
+    @classmethod
+    def _validate_verifier_result(cls, verdict: Any) -> bool:
+        cls._encode_bounded_json(verdict, label="verifier result")
+        if type(verdict) is not bool:
+            raise EAKError("verifier result must be bool")
+        return verdict
 
     @classmethod
     def _decode_task_payload(cls, payload_json: Any) -> dict[str, Any]:
@@ -529,8 +552,7 @@ class EmpireAutonomyKernel:
             payload = dict(task["payload"])
             payload["_task_id"] = task_id
             result = executor(payload)
-            if not isinstance(result, dict):
-                raise EAKError("executor result must be dict")
+            result_json = self._encode_executor_result(result)
             authority = Authority(task["authority"])
             if (
                 authority >= Authority.A2_REVERSIBLE
@@ -540,11 +562,13 @@ class EmpireAutonomyKernel:
                 raise EAKError("rollback evidence required")
 
             self._begin_verification(task_id)
-            if not verifier(payload, result):
+            verdict = verifier(payload, result)
+            if not self._validate_verifier_result(verdict):
                 raise EAKError("verification failed")
+            if self._encode_executor_result(result) != result_json:
+                raise EAKError("verifier mutated executor result")
 
             receipt_id = f"eakr-{uuid.uuid4().hex}"
-            result_json = json.dumps(result, sort_keys=True)
             with self.db.connect() as c:
                 c.execute("BEGIN IMMEDIATE")
                 gate = c.execute(
@@ -581,7 +605,7 @@ class EmpireAutonomyKernel:
                 "task_id": task_id,
                 "state": "CLOSED",
                 "receipt_id": receipt_id,
-                "result": result,
+                "result": json.loads(result_json),
             }
         except Exception as exc:
             self._settle_failure(task_id, exc)
