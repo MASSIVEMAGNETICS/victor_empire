@@ -169,17 +169,22 @@ class DevVilleOrganRunner:
                 daemon=True,
             ),
         ]
-        for reader in readers:
-            reader.start()
+        try:
+            for reader in readers:
+                reader.start()
+        except RuntimeError as exc:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.wait()
+            for reader in readers:
+                if reader.ident is not None:
+                    reader.join(timeout=1)
+            raise OrganError("unable to start dev-ville output readers") from exc
 
         deadline = time.monotonic() + self.timeout_seconds
         timed_out = False
-        for reader in readers:
-            if not reader.is_alive():
-                process.kill()
-                process.wait()
-                raise OrganError("unable to start dev-ville output readers")
-
         try:
             while process.poll() is None:
                 if stdout_overflow.is_set() or stderr_overflow.is_set():
