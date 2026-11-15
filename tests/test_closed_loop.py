@@ -9,7 +9,12 @@ from pathlib import Path
 
 from victor_runtime import VictorKernel
 from victor_runtime.kernel import PolicyError
-from victor_runtime.organs import OrganError
+from victor_runtime.organs import (
+    MAX_STDERR_BYTES,
+    MAX_STDOUT_BYTES,
+    DevVilleOrganRunner,
+    OrganError,
+)
 
 
 FAKE_ADAPTER = r'''
@@ -111,6 +116,18 @@ class ClosedLoopTests(unittest.TestCase):
         (root / "victor_adapter.py").write_text(textwrap.dedent(FAKE_ADAPTER), encoding="utf-8")
         return temp, root
 
+    def make_runner_with_script(self, script: str, *, timeout_seconds: int = 5):
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name)
+        (root / "victor_adapter.py").write_text(textwrap.dedent(script), encoding="utf-8")
+        runner = DevVilleOrganRunner(
+            data_dir=root / "data",
+            workspace=root / "workspace",
+            devville_root=root,
+            timeout_seconds=timeout_seconds,
+        )
+        return temp, runner
+
     def test_closed_loop_completes_and_verifies_chain(self):
         temp, kernel = self.make_kernel()
         self.addCleanup(temp.cleanup)
@@ -141,6 +158,50 @@ class ClosedLoopTests(unittest.TestCase):
         self.assertEqual(status["recent_organ_runs"][0]["status"], "committed")
         devville = next(item for item in status["organs"] if item["name"] == "dev-ville")
         self.assertEqual(devville["status"], "ready")
+
+    def test_devville_stdout_overflow_is_rejected(self):
+        script = f"""
+            import os
+            import time
+
+            remaining = {MAX_STDOUT_BYTES + 1}
+            chunk = b"x" * 16384
+            while remaining:
+                try:
+                    written = os.write(1, chunk[:remaining])
+                    remaining -= written
+                except BlockingIOError:
+                    time.sleep(0.001)
+        """
+        temp, runner = self.make_runner_with_script(script)
+        self.addCleanup(temp.cleanup)
+        with self.assertRaisesRegex(OrganError, "stdout exceeded"):
+            runner.probe()
+
+    def test_devville_stderr_overflow_is_rejected(self):
+        script = f"""
+            import os
+            import time
+
+            remaining = {MAX_STDERR_BYTES + 1}
+            chunk = b"x" * 16384
+            while remaining:
+                try:
+                    written = os.write(2, chunk[:remaining])
+                    remaining -= written
+                except BlockingIOError:
+                    time.sleep(0.001)
+        """
+        temp, runner = self.make_runner_with_script(script)
+        self.addCleanup(temp.cleanup)
+        with self.assertRaisesRegex(OrganError, "stderr exceeded"):
+            runner.probe()
+
+    def test_devville_timeout_remains_bounded(self):
+        temp, runner = self.make_runner_with_script("import time\ntime.sleep(2)\n", timeout_seconds=1)
+        self.addCleanup(temp.cleanup)
+        with self.assertRaisesRegex(OrganError, "timed out after 1s"):
+            runner.probe()
 
     def test_devville_missing_adapter_fails_and_releases_active_work(self):
         missing_temp = tempfile.TemporaryDirectory()

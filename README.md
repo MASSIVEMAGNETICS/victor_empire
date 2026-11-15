@@ -74,7 +74,7 @@ Victor work order
     -> canonical outcome commit
 ```
 
-Victor launches the adapter with an exact Python command, `shell=False`, a stripped environment, a bounded timeout, and a scoped output directory. Dev-Ville's adapter additionally rejects unsafe paths and denies network/subprocess events through a Python audit hook during execution.
+Victor launches the adapter with an exact Python command, `shell=False`, a stripped environment, a bounded timeout, and a scoped output directory. Dev-Ville's adapter additionally rejects unsafe paths and denies network/subprocess events through a Python audit hook during execution. Adapter stdout and stderr are drained concurrently with hard caps of 1 MiB and 256 KiB respectively; exceeding either cap terminates the child process and fails the work order before JSON parsing.
 
 That audit hook is defense in depth, not an OS sandbox. Hostile code should still run under a restricted OS account, container, VM, or equivalent isolation.
 

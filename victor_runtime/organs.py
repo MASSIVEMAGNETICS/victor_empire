@@ -5,6 +5,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,9 @@ JOB_SCHEMA = "victor.organ.job.v1"
 RECEIPT_SCHEMA = "victor.organ.receipt.v1"
 DEVVILLE_ORGAN = "dev-ville"
 DEVVILLE_CAPABILITY = "devville.project.build"
+MAX_STDOUT_BYTES = 1_048_576
+MAX_STDERR_BYTES = 262_144
+_OUTPUT_READ_CHUNK_BYTES = 64 * 1024
 
 
 class OrganError(RuntimeError):
@@ -34,6 +39,33 @@ def _inside(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _drain_bounded(
+    pipe: Any,
+    limit: int,
+    captured: bytearray,
+    overflow: threading.Event,
+    read_error: threading.Event,
+) -> None:
+    """Drain a child stream while retaining no more than its configured limit."""
+    try:
+        while True:
+            chunk = pipe.read(_OUTPUT_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            remaining = limit - len(captured)
+            if remaining > 0:
+                captured.extend(chunk[:remaining])
+            if len(chunk) > max(remaining, 0):
+                overflow.set()
+    except (OSError, ValueError):
+        read_error.set()
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError):
+            read_error.set()
 
 
 class DevVilleOrganRunner:
@@ -106,20 +138,106 @@ class DevVilleOrganRunner:
         adapter = self._require_adapter()
         command = [sys.executable, str(adapter), *args]
         try:
-            return subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=str(self.devville_root),
                 env=self._minimal_env(),
-                text=True,
-                capture_output=True,
-                timeout=self.timeout_seconds,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
                 check=False,
                 shell=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise OrganError(f"dev-ville organ timed out after {self.timeout_seconds}s") from exc
         except OSError as exc:
             raise OrganError(f"unable to launch dev-ville organ: {exc}") from exc
+
+        stdout = bytearray()
+        stderr = bytearray()
+        stdout_overflow = threading.Event()
+        stderr_overflow = threading.Event()
+        stdout_read_error = threading.Event()
+        stderr_read_error = threading.Event()
+        readers = [
+            threading.Thread(
+                target=_drain_bounded,
+                args=(process.stdout, MAX_STDOUT_BYTES, stdout, stdout_overflow, stdout_read_error),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_drain_bounded,
+                args=(process.stderr, MAX_STDERR_BYTES, stderr, stderr_overflow, stderr_read_error),
+                daemon=True,
+            ),
+        ]
+        for reader in readers:
+            reader.start()
+
+        deadline = time.monotonic() + self.timeout_seconds
+        timed_out = False
+        for reader in readers:
+            if not reader.is_alive():
+                process.kill()
+                process.wait()
+                raise OrganError("unable to start dev-ville output readers")
+
+        try:
+            while process.poll() is None:
+                if stdout_overflow.is_set() or stderr_overflow.is_set():
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    break
+                time.sleep(min(0.01, remaining))
+            returncode = process.wait()
+        finally:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.wait()
+            for reader in readers:
+                reader.join(timeout=2)
+            if any(reader.is_alive() for reader in readers):
+                for pipe in (process.stdout, process.stderr):
+                    if pipe is not None and not pipe.closed:
+                        try:
+                            pipe.close()
+                        except (OSError, ValueError):
+                            pass
+                for reader in readers:
+                    reader.join(timeout=1)
+
+        if timed_out:
+            raise OrganError(f"dev-ville organ timed out after {self.timeout_seconds}s")
+        if stdout_overflow.is_set():
+            raise OrganError(
+                f"dev-ville organ stdout exceeded {MAX_STDOUT_BYTES} bytes; process terminated"
+            )
+        if stderr_overflow.is_set():
+            raise OrganError(
+                f"dev-ville organ stderr exceeded {MAX_STDERR_BYTES} bytes; process terminated"
+            )
+        if stdout_read_error.is_set() or stderr_read_error.is_set():
+            raise OrganError("dev-ville organ output could not be drained safely")
+        if any(reader.is_alive() for reader in readers):
+            raise OrganError("dev-ville organ output readers did not terminate")
+
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
 
     def probe(self) -> dict[str, Any]:
         proc = self._invoke(["probe"])
