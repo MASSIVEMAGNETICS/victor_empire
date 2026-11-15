@@ -145,7 +145,6 @@ class DevVilleOrganRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
-                check=False,
                 shell=False,
             )
         except OSError as exc:
