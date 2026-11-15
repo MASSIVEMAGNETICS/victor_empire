@@ -197,6 +197,31 @@ class ClosedLoopTests(unittest.TestCase):
         with self.assertRaisesRegex(OrganError, "stderr exceeded"):
             runner.probe()
 
+    def test_devville_drains_stdout_and_stderr_concurrently(self):
+        # stdout stays below its cap but exceeds a normal pipe buffer before
+        # stderr crosses its smaller cap. Both readers must be active or the
+        # child blocks and the runner times out instead of detecting overflow.
+        script = f"""
+            import os
+
+            def write_all(fd, total):
+                remaining = total
+                chunk = b"x" * 16384
+                while remaining:
+                    try:
+                        written = os.write(fd, chunk[:remaining])
+                    except OSError:
+                        return
+                    remaining -= written
+
+            write_all(1, {MAX_STDOUT_BYTES // 2})
+            write_all(2, {MAX_STDERR_BYTES + 1})
+        """
+        temp, runner = self.make_runner_with_script(script, timeout_seconds=3)
+        self.addCleanup(temp.cleanup)
+        with self.assertRaisesRegex(OrganError, "stderr exceeded"):
+            runner.probe()
+
     def test_devville_timeout_remains_bounded(self):
         temp, runner = self.make_runner_with_script("import time\ntime.sleep(2)\n", timeout_seconds=1)
         self.addCleanup(temp.cleanup)
