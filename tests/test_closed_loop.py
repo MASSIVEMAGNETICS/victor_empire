@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
+import time
 import tempfile
 import textwrap
 import unittest
@@ -15,6 +18,41 @@ from victor_runtime.organs import (
     DevVilleOrganRunner,
     OrganError,
 )
+
+
+def _pid_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return False
+        try:
+            result = kernel32.WaitForSingleObject(handle, 0)
+            if result == 0xFFFFFFFF:
+                raise OSError(ctypes.get_last_error(), "WaitForSingleObject failed")
+            return result == 0x00000102  # WAIT_TIMEOUT means still running
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    if sys.platform.startswith("linux"):
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[2]
+        except FileNotFoundError:
+            return False
+        return state != "Z"
+    return True
 
 
 FAKE_ADAPTER = r'''
@@ -227,6 +265,35 @@ class ClosedLoopTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         with self.assertRaisesRegex(OrganError, "timed out after 1s"):
             runner.probe()
+
+    def test_devville_descendant_is_terminated_when_adapter_exits(self):
+        temp_root = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_root.cleanup)
+        root = Path(temp_root.name)
+        pid_path = root / "descendant.pid"
+        script = f"""
+            import subprocess
+            import sys
+            from pathlib import Path
+
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            Path({str(pid_path)!r}).write_text(str(child.pid), encoding="utf-8")
+            print("adapter exiting")
+        """
+        runner_temp, runner = self.make_runner_with_script(script, timeout_seconds=5)
+        self.addCleanup(runner_temp.cleanup)
+
+        started = time.monotonic()
+        with self.assertRaisesRegex(OrganError, "descendant processes"):
+            runner.probe()
+        elapsed = time.monotonic() - started
+
+        child_pid = int(pid_path.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 3
+        while _pid_is_running(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(_pid_is_running(child_pid), "adapter descendant remained alive")
+        self.assertLess(elapsed, 5, "process-tree cleanup exceeded the adapter deadline")
 
     def test_devville_missing_adapter_fails_and_releases_active_work(self):
         missing_temp = tempfile.TemporaryDirectory()
