@@ -105,7 +105,6 @@ class _WindowsJob:
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
     _THREAD_SUSPEND_RESUME = 0x0002
     _TH32CS_SNAPTHREAD = 0x00000004
-    _INVALID_HANDLE_VALUE = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
 
     def __init__(self) -> None:
         import ctypes
@@ -113,6 +112,7 @@ class _WindowsJob:
 
         self._ctypes = ctypes
         self._wintypes = wintypes
+        self._INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._configure_api()
         self._handle = self._kernel32.CreateJobObjectW(None, None)
@@ -227,6 +227,11 @@ class _WindowsJob:
                 ("tpDeltaPri", wintypes.LONG),
                 ("dwFlags", wintypes.DWORD),
             ]
+
+        kernel32.Thread32First.argtypes = [ctypes.c_void_p, ctypes.POINTER(ThreadEntry32)]
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = [ctypes.c_void_p, ctypes.POINTER(ThreadEntry32)]
+        kernel32.Thread32Next.restype = wintypes.BOOL
 
         snapshot = kernel32.CreateToolhelp32Snapshot(self._TH32CS_SNAPTHREAD, 0)
         if not snapshot or snapshot == self._INVALID_HANDLE_VALUE:
