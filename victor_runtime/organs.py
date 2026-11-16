@@ -518,11 +518,13 @@ class DevVilleOrganRunner:
                 terminate_tree()
                 for reader in readers:
                     reader.join(timeout=2)
-            readers_stuck = any(reader.is_alive() for reader in readers)
             try:
                 process_tree.close()
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
+            for reader in readers:
+                reader.join(timeout=2)
+            readers_stuck = any(reader.is_alive() for reader in readers)
 
         if cleanup_error is not None:
             raise OrganError(f"dev-ville process-tree cleanup failed: {cleanup_error}") from cleanup_error
