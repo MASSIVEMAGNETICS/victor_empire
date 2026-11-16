@@ -74,9 +74,9 @@ Victor work order
     -> canonical outcome commit
 ```
 
-Victor launches the adapter with an exact Python command, `shell=False`, a stripped environment, a bounded timeout, and a scoped output directory. Dev-Ville's adapter additionally rejects unsafe paths and denies network/subprocess events through a Python audit hook during execution. Adapter stdout and stderr are drained concurrently with hard caps of 1 MiB and 256 KiB respectively; exceeding either cap terminates the child process and fails the work order before JSON parsing.
+Victor launches the adapter with an exact Python command, `shell=False`, a stripped environment, a bounded timeout, and a scoped output directory. On POSIX, the adapter starts in a new session/process group; on Windows, it starts suspended and is assigned to a kill-on-close Job Object before its primary thread is resumed. Stdout and stderr are drained concurrently with hard caps of 1 MiB and 256 KiB respectively. Timeout, output overflow, or adapter exit with surviving descendants terminates the contained process tree and fails the work order before JSON parsing.
 
-That audit hook is defense in depth, not an OS sandbox. Hostile code should still run under a restricted OS account, container, VM, or equivalent isolation.
+The audit hook and process-tree boundary are defense in depth, not a complete OS sandbox. POSIX descendants that deliberately create a new session can escape the adapter process group; hostile code should still run under a restricted OS account, container, VM, or equivalent isolation.
 
 If Dev-Ville is missing, times out, violates the contract, returns an incomplete project, or returns a bad digest, Victor fails the work order, closes the lease, marks the organ degraded, and appends the failure to causal history.
 
