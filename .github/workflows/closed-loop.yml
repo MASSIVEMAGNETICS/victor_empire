@@ -24,6 +24,18 @@ jobs:
           python command_center.py --data-dir /tmp/victor-ci --workspace /tmp/victor-artifacts run "CI closed-loop smoke test"
           python command_center.py --data-dir /tmp/victor-ci --workspace /tmp/victor-artifacts verify-chain
 
+
+  windows-process-tree:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run closed-loop subprocess tests on Windows
+        run: python -m unittest discover -s tests -p test_closed_loop.py -v
+
   devville-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 10
