@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -66,6 +67,265 @@ def _drain_bounded(
             pipe.close()
         except (OSError, ValueError):
             read_error.set()
+
+
+class _PosixProcessGroup:
+    """Owns the adapter's POSIX process group, including ordinary descendants."""
+
+    def __init__(self, process_id: int) -> None:
+        self.process_id = process_id
+
+    def has_descendants(self) -> bool:
+        try:
+            os.killpg(self.process_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def terminate(self) -> None:
+        try:
+            os.killpg(self.process_id, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            raise OrganError(f"unable to terminate adapter process group: {exc}") from exc
+
+    def close(self) -> None:
+        return
+
+
+class _WindowsJob:
+    """Places the suspended adapter in a kill-on-close Windows Job Object."""
+
+    _CREATE_SUSPENDED = 0x00000004
+    _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _THREAD_SUSPEND_RESUME = 0x0002
+    _TH32CS_SNAPTHREAD = 0x00000004
+    _INVALID_HANDLE_VALUE = (1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        self._wintypes = wintypes
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._configure_api()
+        self._handle = self._kernel32.CreateJobObjectW(None, None)
+        if not self._handle:
+            self._raise_last_error("CreateJobObjectW")
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        class BasicAccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        self._extended_limit_type = ExtendedLimitInformation
+        self._accounting_type = BasicAccountingInformation
+        limits = ExtendedLimitInformation()
+        limits.BasicLimitInformation.LimitFlags = self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self._kernel32.SetInformationJobObject(
+            self._handle,
+            self._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            self.close()
+            self._raise_last_error("SetInformationJobObject")
+
+    def _configure_api(self) -> None:
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+        kernel32 = self._kernel32
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
+            wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = ctypes.c_void_p
+        kernel32.ResumeThread.argtypes = [ctypes.c_void_p]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+
+    def _raise_last_error(self, action: str) -> None:
+        error = self._ctypes.get_last_error()
+        raise OrganError(f"{action} failed: {self._ctypes.WinError(error)}")
+
+    def assign_and_resume(self, process: subprocess.Popen[bytes]) -> None:
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+        kernel32 = self._kernel32
+
+        if not kernel32.AssignProcessToJobObject(self._handle, int(process._handle)):
+            self._raise_last_error("AssignProcessToJobObject")
+
+        class ThreadEntry32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(self._TH32CS_SNAPTHREAD, 0)
+        if not snapshot or snapshot == self._INVALID_HANDLE_VALUE:
+            self._raise_last_error("CreateToolhelp32Snapshot")
+
+        try:
+            entry = ThreadEntry32()
+            entry.dwSize = ctypes.sizeof(entry)
+            found = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.th32OwnerProcessID == process.pid:
+                    thread = kernel32.OpenThread(
+                        self._THREAD_SUSPEND_RESUME, False, entry.th32ThreadID
+                    )
+                    if not thread:
+                        self._raise_last_error("OpenThread")
+                    try:
+                        if kernel32.ResumeThread(thread) == 0xFFFFFFFF:
+                            self._raise_last_error("ResumeThread")
+                    finally:
+                        kernel32.CloseHandle(thread)
+                    return
+                found = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            raise OrganError("unable to locate the suspended adapter's primary thread")
+        finally:
+            kernel32.CloseHandle(snapshot)
+
+    def has_descendants(self) -> bool:
+        info = self._accounting_type()
+        returned = self._wintypes.DWORD()
+        if not self._kernel32.QueryInformationJobObject(
+            self._handle,
+            self._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            self._ctypes.byref(info),
+            self._ctypes.sizeof(info),
+            self._ctypes.byref(returned),
+        ):
+            self._raise_last_error("QueryInformationJobObject")
+        return info.ActiveProcesses > 0
+
+    def terminate(self) -> None:
+        if self._handle and self.has_descendants():
+            if not self._kernel32.TerminateJobObject(self._handle, 1):
+                self._raise_last_error("TerminateJobObject")
+
+    def close(self) -> None:
+        if self._handle:
+            handle = self._handle
+            self._handle = None
+            if not self._kernel32.CloseHandle(handle):
+                self._raise_last_error("CloseHandle(Job Object)")
+
+
+def _spawn_contained(
+    command: list[str], *, cwd: str, env: dict[str, str]
+) -> tuple[subprocess.Popen[bytes], Any]:
+    common = {
+        "cwd": cwd,
+        "env": env,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": False,
+        "shell": False,
+    }
+    if os.name != "nt":
+        process = subprocess.Popen(command, start_new_session=True, **common)
+        return process, _PosixProcessGroup(process.pid)
+
+    job = _WindowsJob()
+    process = None
+    try:
+        process = subprocess.Popen(
+            command,
+            creationflags=_WindowsJob._CREATE_SUSPENDED,
+            **common,
+        )
+        job.assign_and_resume(process)
+        return process, job
+    except Exception as exc:
+        try:
+            job.terminate()
+        except Exception:
+            pass
+        if process is not None:
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.wait()
+        try:
+            job.close()
+        except Exception:
+            pass
+        if isinstance(exc, OrganError):
+            raise
+        raise OrganError("unable to establish Windows Job Object containment") from exc
 
 
 class DevVilleOrganRunner:
@@ -138,17 +398,13 @@ class DevVilleOrganRunner:
         adapter = self._require_adapter()
         command = [sys.executable, str(adapter), *args]
         try:
-            process = subprocess.Popen(
+            process, process_tree = _spawn_contained(
                 command,
                 cwd=str(self.devville_root),
                 env=self._minimal_env(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False,
-                shell=False,
             )
-        except OSError as exc:
-            raise OrganError(f"unable to launch dev-ville organ: {exc}") from exc
+        except (OSError, OrganError) as exc:
+            raise OrganError(f"unable to launch contained dev-ville organ: {exc}") from exc
 
         stdout = bytearray()
         stderr = bytearray()
@@ -168,42 +424,84 @@ class DevVilleOrganRunner:
                 daemon=True,
             ),
         ]
+        cleanup_error = None
+        failure = None
+        readers_stuck = False
+
+        def terminate_tree() -> None:
+            nonlocal cleanup_error
+            try:
+                process_tree.terminate()
+            except Exception as exc:
+                cleanup_error = exc
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+
         try:
             for reader in readers:
                 reader.start()
         except RuntimeError as exc:
+            terminate_tree()
             try:
-                process.kill()
-            except OSError:
-                pass
-            process.wait()
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.wait()
             for reader in readers:
                 if reader.ident is not None:
-                    reader.join(timeout=1)
+                    reader.join(timeout=2)
+            process_tree.close()
             raise OrganError("unable to start dev-ville output readers") from exc
 
         deadline = time.monotonic() + self.timeout_seconds
-        timed_out = False
         try:
-            while process.poll() is None:
-                if stdout_overflow.is_set() or stderr_overflow.is_set():
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
+            while True:
+                if stdout_overflow.is_set():
+                    failure = f"dev-ville organ stdout exceeded {MAX_STDOUT_BYTES} bytes; process tree terminated"
+                    terminate_tree()
                     break
+                if stderr_overflow.is_set():
+                    failure = f"dev-ville organ stderr exceeded {MAX_STDERR_BYTES} bytes; process tree terminated"
+                    terminate_tree()
+                    break
+
+                parent_running = process.poll() is None
+                readers_running = any(reader.is_alive() for reader in readers)
+                if not parent_running:
+                    if process_tree.has_descendants():
+                        failure = "dev-ville organ left descendant processes running; process tree terminated"
+                        terminate_tree()
+                        break
+                    if not readers_running:
+                        break
+
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    timed_out = True
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
+                    if parent_running:
+                        failure = f"dev-ville organ timed out after {self.timeout_seconds}s; process tree terminated"
+                    else:
+                        failure = "dev-ville organ output streams remained open after adapter exit; process-tree cleanup attempted"
+                    terminate_tree()
                     break
                 time.sleep(min(0.01, remaining))
-            returncode = process.wait()
+
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                terminate_tree()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.wait()
         finally:
             if process.poll() is None:
+                terminate_tree()
                 try:
                     process.kill()
                 except OSError:
@@ -212,33 +510,35 @@ class DevVilleOrganRunner:
             for reader in readers:
                 reader.join(timeout=2)
             if any(reader.is_alive() for reader in readers):
-                for pipe in (process.stdout, process.stderr):
-                    if pipe is not None and not pipe.closed:
-                        try:
-                            pipe.close()
-                        except (OSError, ValueError):
-                            pass
+                terminate_tree()
                 for reader in readers:
-                    reader.join(timeout=1)
+                    reader.join(timeout=2)
+            readers_stuck = any(reader.is_alive() for reader in readers)
+            try:
+                process_tree.close()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
 
-        if timed_out:
-            raise OrganError(f"dev-ville organ timed out after {self.timeout_seconds}s")
+        if cleanup_error is not None:
+            raise OrganError(f"dev-ville process-tree cleanup failed: {cleanup_error}") from cleanup_error
+        if failure:
+            raise OrganError(failure)
+        if readers_stuck:
+            raise OrganError("dev-ville output readers did not terminate after process-tree cleanup")
         if stdout_overflow.is_set():
             raise OrganError(
-                f"dev-ville organ stdout exceeded {MAX_STDOUT_BYTES} bytes; process terminated"
+                f"dev-ville organ stdout exceeded {MAX_STDOUT_BYTES} bytes; process tree terminated"
             )
         if stderr_overflow.is_set():
             raise OrganError(
-                f"dev-ville organ stderr exceeded {MAX_STDERR_BYTES} bytes; process terminated"
+                f"dev-ville organ stderr exceeded {MAX_STDERR_BYTES} bytes; process tree terminated"
             )
         if stdout_read_error.is_set() or stderr_read_error.is_set():
             raise OrganError("dev-ville organ output could not be drained safely")
-        if any(reader.is_alive() for reader in readers):
-            raise OrganError("dev-ville organ output readers did not terminate")
 
         return subprocess.CompletedProcess(
             command,
-            returncode,
+            process.returncode if process.returncode is not None else 0,
             stdout.decode("utf-8", errors="replace"),
             stderr.decode("utf-8", errors="replace"),
         )
